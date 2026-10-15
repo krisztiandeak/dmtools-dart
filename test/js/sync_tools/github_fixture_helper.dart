@@ -25,14 +25,16 @@ class GithubFixtureServer {
   ///
   /// The log dir is created here (not in a field initializer) so it is
   /// strictly coupled to the spawned process.
-  Future<void> start() async {
+  ///
+  /// [script] is the fixture server file beside this helper (defaults to
+  /// the GitHub one; `gitlab_issues_fixture_server.py` serves GitLab).
+  Future<void> start({String script = 'github_fixture_server.py'}) async {
     final dir = Directory.systemTemp.createTempSync('dmtools_ghfx_');
     _logFile = File('${dir.path}/r.log');
-    final script = '${Directory.current.path}'
-        '/test/js/sync_tools/github_fixture_server.py';
+    final scriptPath = '${Directory.current.path}/test/js/sync_tools/$script';
     _process = await Process.start(
       'python3',
-      [script, '0', _logFile!.path],
+      [scriptPath, '0', _logFile!.path],
     );
     final firstLine = await _process!.stdout
         .transform(utf8.decoder)

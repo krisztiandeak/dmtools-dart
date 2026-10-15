@@ -22,6 +22,7 @@ import '../../integrations/jira/jira_utils.dart';
 import '../sync_http_client.dart';
 import 'package:dmtools/src/integrations/jira/markdown_to_jira_markup.dart';
 import 'tracker_github_router.dart';
+import 'tracker_gitlab_router.dart';
 
 part 'jira_sync_http_helpers.dart';
 part 'jira_sync_field_update.dart';
@@ -31,14 +32,20 @@ class JiraSyncTools {
   /// Creates Jira tooling; config is resolved per call.
   ///
   /// [trackerRouter] routes `gh-<number>` ticket calls to GitHub Issues
-  /// when Jira is unconfigured (see [TrackerGitHubRouter]); tests inject a
-  /// logger-capturing instance.
-  const JiraSyncTools({TrackerGitHubRouter trackerRouter = _defaultRouter})
-      : _trackerRouter = trackerRouter;
+  /// when Jira is unconfigured (see [TrackerGitHubRouter]), and — with
+  /// `DEFAULT_TRACKER=gitlab` — to GitLab Issues ([TrackerGitLabRouter]);
+  /// tests inject logger-capturing instances.
+  const JiraSyncTools({
+    TrackerGitHubRouter trackerRouter = _defaultRouter,
+    TrackerGitLabRouter gitlabRouter = _defaultGitlabRouter,
+  })  : _trackerRouter = trackerRouter,
+        _gitlabRouter = gitlabRouter;
 
   static const _defaultRouter = TrackerGitHubRouter();
+  static const _defaultGitlabRouter = TrackerGitLabRouter();
 
   final TrackerGitHubRouter _trackerRouter;
+  final TrackerGitLabRouter _gitlabRouter;
 
   /// Jira tool executors: canonical `@MCPTool` names plus the dispatch
   /// aliases (`jira_assign`, `jira_create_ticket`, `tracker_*`).
@@ -77,13 +84,15 @@ class JiraSyncTools {
 
   /// Dispatches a Jira tool call against [handlers].
   ///
-  /// Tracker-shaped calls on `gh-<number>` keys route to GitHub Issues
-  /// first when Jira is unconfigured ([TrackerGitHubRouter]); everything
+  /// Tracker-shaped calls on `gh-<number>` keys route to GitLab Issues
+  /// (`DEFAULT_TRACKER=gitlab`) or GitHub Issues first when Jira is
+  /// unconfigured ([TrackerGitLabRouter], [TrackerGitHubRouter]); everything
   /// else keeps the Jira path. Mirrors the dispatcher's error contract:
   /// unknown names yield `{"error": "Unsupported Jira tool: …"}`, missing
   /// config yields `{"error": "Jira not configured"}`.
   String dispatch(String toolName, Map<String, dynamic> args) {
-    final routed = _trackerRouter.maybeRoute(toolName, args);
+    final routed = _gitlabRouter.maybeRoute(toolName, args) ??
+        _trackerRouter.maybeRoute(toolName, args);
     if (routed != null) return routed;
     final fn = handlers[toolName];
     if (fn == null) return _err('Unsupported Jira tool: $toolName');
