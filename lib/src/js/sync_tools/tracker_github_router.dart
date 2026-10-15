@@ -52,6 +52,7 @@ import '../../config/property_reader_getters.dart';
 import '../sync_http_client.dart';
 import 'jira_markup.dart';
 import 'sync_request_helpers.dart';
+import 'tracker_routing_common.dart';
 
 /// Tracker-shaped `jira_*` ticket tools eligible for GitHub routing.
 const _routableKeyTools = {
@@ -63,56 +64,12 @@ const _routableKeyTools = {
   'jira_move_to_status',
 };
 
-/// `gh-<number>` ticket key shape (lowercase, digits only).
-final _ghKeyPattern = RegExp(r'^gh-(\d+)$');
-
-/// Status names that close the issue (normalized lowercase).
-const _doneStatuses = {
-  'done',
-  'closed',
-  'resolved',
-  'complete',
-  'completed',
-  'fixed',
-  'merged',
-};
-
-/// Status names that reopen a closed issue (normalized lowercase).
-const _openStatuses = {
-  'open',
-  'reopened',
-  'todo',
-  'backlog',
-  'new',
-  'in progress',
-  'in development',
-  'ready for development',
-  'in review',
-  'review',
-  'ready for review',
-};
-
 /// Connection config for one routed GitHub Issues call.
 typedef _GhRouteConfig = ({
   String baseUrl,
   Map<String, String> headers,
   String repoSeg,
 });
-
-/// Parsed best-effort JQL filters for `jira_search_by_jql`.
-class _JqlFilters {
-  /// `gh-<number>` issue numbers from `key` clauses.
-  final List<String> keyNumbers = [];
-
-  /// Matched `labels`/`label` clause values (ANY-of semantics).
-  final List<String> labels = [];
-
-  /// Matched `status` clause values (ANY-of semantics).
-  final List<String> statuses = [];
-
-  /// Matched `assignee` clause values (ANY-of semantics).
-  final List<String> assignees = [];
-}
 
 /// Routes tracker-shaped `jira_*` calls to GitHub Issues when the opt-in
 /// rule matches (see the library doc for the routing table).
@@ -125,15 +82,12 @@ class TrackerGitHubRouter {
   final void Function(String line)? _logger;
 
   /// The issue number digits of a `gh-<number>` ticket key, else `null`.
-  static String? ghIssueNumber(dynamic key) {
-    if (key is! String) return null;
-    return _ghKeyPattern.firstMatch(key)?.group(1);
-  }
+  static String? ghIssueNumber(dynamic key) => trackerIssueNumber(key);
 
   /// Routes [toolName] to GitHub Issues when the opt-in rule matches;
   /// returns `null` to fall through to the normal Jira execution path.
   String? maybeRoute(String toolName, Map<String, dynamic> args) {
-    final number = ghIssueNumber(args['key']);
+    final number = trackerIssueNumber(args['key']);
     final isSearch = toolName == 'jira_search_by_jql';
     if (!isSearch &&
         (number == null || !_routableKeyTools.contains(toolName))) {
@@ -316,12 +270,7 @@ class TrackerGitHubRouter {
     String status,
     String currentState,
   ) {
-    final normalized = status.trim().toLowerCase();
-    final target = _doneStatuses.contains(normalized)
-        ? 'closed'
-        : _openStatuses.contains(normalized)
-            ? 'open'
-            : null;
+    final target = targetIssueState(status);
     if (target == null || target == currentState) return jsonEncode('');
     final resp = SyncHttpClient.patch(
       _issueUrl(c, number),
@@ -340,13 +289,13 @@ class TrackerGitHubRouter {
   /// instead of a silently wrong result.
   String _searchByJql(_GhRouteConfig c, Map<String, dynamic> args) {
     final jql = syncAsStr(args['jql']).trim();
-    final numbers = _keyNumbers(jql);
+    final numbers = keyNumbers(jql);
     if (numbers != null) {
-      return _ticketsByKeyNumbers(c, numbers, _JqlFilters());
+      return _ticketsByKeyNumbers(c, numbers, JqlFilters());
     }
-    final parsed = _parseJqlFilters(jql);
+    final parsed = parseJqlFilters(jql, forge: 'GitHub');
     if (parsed is String) return syncErr(parsed);
-    final filters = parsed as _JqlFilters;
+    final filters = parsed as JqlFilters;
     return filters.keyNumbers.isNotEmpty
         ? _ticketsByKeyNumbers(c, filters.keyNumbers, filters)
         : _searchIssueList(c, jql, filters);
@@ -359,7 +308,7 @@ class TrackerGitHubRouter {
   String _ticketsByKeyNumbers(
     _GhRouteConfig c,
     List<String> numbers,
-    _JqlFilters filters,
+    JqlFilters filters,
   ) {
     final tickets = <Map<String, dynamic>>[];
     for (final number in numbers) {
@@ -377,9 +326,10 @@ class TrackerGitHubRouter {
   /// endpoint. Multi-value labels/status/assignee filters are honestly
   /// unsupported there — GitHub's list endpoint ANDs comma-joined labels
   /// and takes a single state/assignee, while JQL `in` means ANY.
-  String _searchIssueList(_GhRouteConfig c, String jql, _JqlFilters filters) {
-    if (_hasMultiValueFilters(filters)) {
-      return syncErr(_unsupportedJql(jql, _multiValueReason));
+  String _searchIssueList(_GhRouteConfig c, String jql, JqlFilters filters) {
+    if (filters.hasMultiValue) {
+      return syncErr(
+          unsupportedJql(jql, forge: 'GitHub', reason: multiValueReason));
     }
     final prefix =
         '${c.baseUrl}/repos/${c.repoSeg}/issues?${_issuesListQuery(filters)}';
@@ -392,19 +342,9 @@ class TrackerGitHubRouter {
     ]);
   }
 
-  /// Whether any clause carried more than one value (not expressible on
-  /// the GitHub issues list endpoint).
-  static bool _hasMultiValueFilters(_JqlFilters filters) =>
-      filters.labels.length > 1 ||
-      filters.statuses.length > 1 ||
-      filters.assignees.length > 1;
-
-  static const _multiValueReason = 'multi-value labels/status/assignee '
-      'filters are only supported in key-scoped queries';
-
   /// The issues-list query for [filters] (labels, state, assignee — no
   /// paging params; those are appended per page).
-  static String _issuesListQuery(_JqlFilters filters) => [
+  static String _issuesListQuery(JqlFilters filters) => [
         if (filters.labels.isNotEmpty)
           'labels=${filters.labels.map(Uri.encodeQueryComponent).join(',')}',
         'state=${filters.statuses.isEmpty ? 'all' : _stateForStatus(filters.statuses.first)}',
@@ -412,163 +352,17 @@ class TrackerGitHubRouter {
           'assignee=${Uri.encodeQueryComponent(filters.assignees.first)}',
       ].join('&');
 
-  /// Client-side AND-ed filter match on a fetched issue: labels, status,
-  /// and assignee clauses are ANY-of (JQL `in` semantics), matching
-  /// case-insensitively on label/status names and assignee logins.
-  static bool _matchesFilters(Map<String, dynamic> issue, _JqlFilters f) {
-    if (f.labels.isNotEmpty &&
-        !_anyOverlap(_labelNames(issue['labels']), f.labels)) {
-      return false;
-    }
-    if (f.statuses.isNotEmpty &&
-        !_anyOverlap([_statusName(issue)], f.statuses)) {
-      return false;
-    }
-    if (f.assignees.isNotEmpty &&
-        !_anyOverlap([_assigneeLogin(issue)], f.assignees)) {
-      return false;
-    }
-    return true;
-  }
-
-  /// Whether [got] (label/status names, assignee logins; possibly null)
-  /// contains any of the wanted values, case-insensitively.
-  static bool _anyOverlap(List<String?> got, List<String> want) {
-    final wanted = {for (final w in want) w.trim().toLowerCase()};
-    return got.any((g) => g != null && wanted.contains(g.trim().toLowerCase()));
-  }
-
-  /// The assignee login of an issue, or `null` when unassigned.
-  static String? _assigneeLogin(Map<String, dynamic> issue) =>
-      (issue['assignee'] as Map?)?['login']?.toString();
-
-  /// The issue numbers when a `key` filter is the *entire* JQL. Combined
-  /// `key` + filter queries must not short-circuit here — the AND-ed
-  /// filters would be silently dropped — so they return `null` and go
-  /// through [_parseJqlFilters] (filters applied client-side).
-  static List<String>? _keyNumbers(String jql) {
-    final single =
-        RegExp(r'^key\s*=\s*(\S+)\s*$', caseSensitive: false).firstMatch(jql);
-    if (single != null) {
-      final number = _ghKeyNumber(single.group(1)!);
-      return number == null ? null : [number];
-    }
-    final inClause =
-        RegExp(r'^key\s+in\s*\(([^)]*)\)\s*$', caseSensitive: false)
-            .firstMatch(jql);
-    if (inClause == null) return null;
-    final numbers = <String>[];
-    for (final value in _clauseValues(inClause.group(1)!)) {
-      final number = _ghKeyNumber(value);
-      // A non-gh value must not be silently dropped here — fall through
-      // to [_parseJqlFilters] for the honest unsupported-JQL error.
-      if (number == null) return null;
-      numbers.add(number);
-    }
-    return numbers.isEmpty ? null : numbers;
-  }
-
-  /// The issue number of a `gh-<number>` key-clause value, else `null`.
-  static String? _ghKeyNumber(String value) =>
-      _ghKeyPattern.firstMatch(value.trim().toLowerCase())?.group(1);
-
-  /// Parses AND-ed `field = value` / `field in (…)` clauses into GitHub
-  /// issue-list filters. Returns an error message string for anything
-  /// outside the supported key/labels/status/assignee surface.
-  static Object _parseJqlFilters(String jql) {
-    final filters = _JqlFilters();
-    if (jql.isEmpty) return filters;
-    for (final clause
-        in jql.split(RegExp(r'\s+and\s+', caseSensitive: false))) {
-      final m = RegExp('^\\s*([A-Za-z]+)\\s*(=|in)\\s*(.+?)\\s*\$')
-          .firstMatch(clause);
-      if (m == null) return _unsupportedJql(jql);
-      final values = _clauseValues(m.group(3)!);
-      final error = _applyClause(filters, m.group(1)!.toLowerCase(), values);
-      if (error != null) return _unsupportedJql(jql);
-    }
-    return filters;
-  }
-
-  static String _unsupportedJql(String jql, [String? reason]) {
-    final detail = reason ??
-        'supported filters: key, labels, status, assignee — = or in, '
-            'AND-ed';
-    return 'unsupported JQL for GitHub tracker routing: "$jql" ($detail)';
-  }
-
-  /// Applies one parsed clause to [filters]; returns non-null when the
-  /// field is outside the supported surface.
-  static String? _applyClause(
-    _JqlFilters filters,
-    String field,
-    List<String> values,
-  ) {
-    switch (field) {
-      case 'key':
-        return _applyKeyNumbers(filters, values);
-      case 'labels' || 'label':
-        filters.labels.addAll(values);
-        return null;
-      case 'status':
-        filters.statuses.addAll(values);
-        return null;
-      case 'assignee':
-        return _applyAssignee(filters, values);
-      default:
-        return 'unsupported field: $field';
-    }
-  }
-
-  /// Applies a `key` clause; only `gh-<number>` keys route to GitHub.
-  static String? _applyKeyNumbers(_JqlFilters filters, List<String> values) {
-    if (values.isEmpty) return 'unsupported key value: (empty)';
-    for (final value in values) {
-      final number = _ghKeyNumber(value);
-      if (number == null) return 'unsupported key value: $value';
-      filters.keyNumbers.add(number);
-    }
-    return null;
-  }
-
-  /// Applies an `assignee` clause; `currentUser()` is unsupported (the
-  /// token owner is not necessarily the intended assignee).
-  static String? _applyAssignee(_JqlFilters filters, List<String> values) {
-    if (values.isEmpty || values.contains('currentUser()')) {
-      return 'unsupported assignee value';
-    }
-    filters.assignees.addAll(values);
-    return null;
-  }
-
-  /// Splits a clause value (`'a'` or `(a, b)`) into bare values.
-  static List<String> _clauseValues(String raw) {
-    var value = raw.trim();
-    if (value.startsWith('(') && value.endsWith(')')) {
-      value = value.substring(1, value.length - 1);
-    }
-    return [
-      for (final part in value.split(','))
-        if (part.trim().isNotEmpty) _unquote(part.trim()),
-    ];
-  }
-
-  static String _unquote(String value) {
-    if (value.length >= 2 &&
-        (value.startsWith("'") && value.endsWith("'") ||
-            value.startsWith('"') && value.endsWith('"'))) {
-      return value.substring(1, value.length - 1);
-    }
-    return value;
-  }
+  /// Client-side AND-ed filter match on a fetched issue.
+  static bool _matchesFilters(Map<String, dynamic> issue, JqlFilters f) =>
+      f.matches(
+        issueLabels: _labelNames(issue['labels']),
+        status: _statusName(issue),
+        assignee: (issue['assignee'] as Map?)?['login']?.toString(),
+      );
 
   /// Maps a status filter value to the GitHub issue `state` query.
-  static String _stateForStatus(String status) {
-    final normalized = status.trim().toLowerCase();
-    if (_doneStatuses.contains(normalized)) return 'closed';
-    if (_openStatuses.contains(normalized)) return 'open';
-    return 'all';
-  }
+  static String _stateForStatus(String status) =>
+      targetIssueState(status) ?? 'all';
 
   // ── HTTP helpers ─────────────────────────────────────────────────────
 
@@ -658,42 +452,30 @@ class TrackerGitHubRouter {
   /// `key` plus `fields.summary` / `fields.description` / `fields.labels`
   /// / `fields.status.name`. A `status:<name>` label wins over the raw
   /// open/closed state for `status.name`.
-  static Map<String, dynamic> _ticketFromIssue(Map<String, dynamic> issue) {
-    final labels = _labelNames(issue['labels']);
-    return {
-      'key': 'gh-${issue['number']}',
-      'fields': {
-        'summary': issue['title'] ?? '',
-        'description': issue['body'] ?? '',
-        'labels': labels,
-        'status': {'name': _statusName(issue)},
-        'issuetype': {'name': 'Issue'},
-      },
-    };
-  }
+  static Map<String, dynamic> _ticketFromIssue(Map<String, dynamic> issue) =>
+      jiraTicket(
+        number: issue['number'],
+        title: issue['title'],
+        body: issue['body'],
+        labels: _labelNames(issue['labels']),
+        statusName: _statusName(issue),
+      );
 
-  /// The Jira-ish status name of an issue: a `status:<name>` label wins
-  /// over the raw open/closed state.
-  static String _statusName(Map<String, dynamic> issue) {
-    for (final label in _labelNames(issue['labels'])) {
-      if (label.startsWith('status:')) {
-        return label.substring('status:'.length);
-      }
-    }
-    return issue['state'] == 'closed' ? 'Done' : 'Open';
-  }
+  /// The Jira-ish status name of an issue (see [statusNameOf]).
+  static String _statusName(Map<String, dynamic> issue) => statusNameOf(
+        _labelNames(issue['labels']),
+        closed: issue['state'] == 'closed',
+      );
 
-  /// Maps a GitHub issue comment to the Jira comment shape (`body`,
-  /// `author.displayName`, `created`, `updated`).
-  static Map<String, dynamic> _commentFromJson(Map<String, dynamic> c) => {
-        'id': c['id']?.toString(),
-        'body': c['body'] ?? '',
-        'author': {
-          'displayName': (c['user'] as Map?)?['login'] ?? '',
-        },
-        'created': c['created_at'],
-        'updated': c['updated_at'],
-      };
+  /// Maps a GitHub issue comment to the Jira comment shape.
+  static Map<String, dynamic> _commentFromJson(Map<String, dynamic> c) =>
+      jiraComment(
+        id: c['id'],
+        body: c['body'],
+        author: (c['user'] as Map?)?['login'],
+        created: c['created_at'],
+        updated: c['updated_at'],
+      );
 
   /// Label names from a GitHub `labels` payload (string or object entries).
   static List<String> _labelNames(dynamic raw) => [
