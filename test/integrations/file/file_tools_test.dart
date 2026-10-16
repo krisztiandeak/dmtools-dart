@@ -19,8 +19,13 @@ ToolDefinition toolNamed(String name) =>
     fileTools().firstWhere((t) => t.name == name);
 
 /// Creates a temp directory for file-operation tests.
-Directory _tempDir() =>
-    Directory.systemTemp.createTempSync('dmtools_file_test_');
+/// Symlink-resolved (macOS `/var` → `/private/var`) so paths compare equal
+/// to the canonical ones the executor reports.
+Directory _tempDir() => Directory(
+      Directory.systemTemp
+          .createTempSync('dmtools_file_test_')
+          .resolveSymbolicLinksSync(),
+    );
 
 /// Catalog shape: names, integration, params, category.
 void toolCatalogTests() {

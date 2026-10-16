@@ -24,6 +24,15 @@ import 'package:test/test.dart';
 
 const _scriptPath = 'scripts/machine_tick.sh';
 
+/// `Process.runSync` throws (not exit≠0) when the binary is missing.
+bool _shellcheckInstalled() {
+  try {
+    return Process.runSync('shellcheck', ['--version']).exitCode == 0;
+  } on ProcessException {
+    return false;
+  }
+}
+
 /// Fake PAT for the dmtools.env leak check — must never surface in output.
 const _fixtureToken = 'ghp_machine_tick_fixture_0123456789abcdef';
 
@@ -152,8 +161,7 @@ void fileSurfaceTests() {
     });
 
     test('shellcheck is clean (skipped when not installed)', () {
-      final probe = Process.runSync('shellcheck', ['--version']);
-      if (probe.exitCode != 0) {
+      if (!_shellcheckInstalled()) {
         return; // CI images ship shellcheck; locally this is best-effort
       }
       final result = Process.runSync('shellcheck', [_scriptPath]);

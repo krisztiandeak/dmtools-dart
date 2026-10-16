@@ -31,7 +31,10 @@ import 'package:test/test.dart';
 late Directory dir;
 
 void main() {
-  setUp(() => dir = Directory.systemTemp.createTempSync('dmtools_fbridge'));
+  // Symlink-resolved (macOS `/var` → `/private/var`) to match reported entries.
+  setUp(() => dir = Directory(Directory.systemTemp
+      .createTempSync('dmtools_fbridge')
+      .resolveSymbolicLinksSync()));
   tearDown(() => dir.deleteSync(recursive: true));
   fileListTests();
   fileExistsTests();
