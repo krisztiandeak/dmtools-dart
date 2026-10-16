@@ -13,7 +13,7 @@ set -euo pipefail
 
 REF="${AGENTS_FETCH_REF:-main}"
 DIR="${AGENTS_FETCH_DIR:-agents}"
-URL="${AGENTS_FETCH_URL:-https://github.com/IstiN/dmtools-agents.git}"
+URL="${AGENTS_FETCH_URL:-https://github.com/krisztiandeak/dmtools-agents.git}"
 
 if [[ "${AGENTS_FETCH_KEEP:-0}" == "1" && -d "$DIR/.git" ]]; then
   echo "[fetch-agents] $DIR already present (AGENTS_FETCH_KEEP=1) — reusing"
