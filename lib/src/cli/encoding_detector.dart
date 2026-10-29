@@ -48,11 +48,13 @@ String? _tryBase64Decode(String encoded) {
 
 /// Attempts a URL-decode; returns the decoded string or `null` on failure.
 ///
-/// `Uri.decodeComponent` throws [FormatException] on malformed percent-escape
-/// sequences (e.g. `%zz`), which counts as a failure here.
+/// Replaces `+` with `%20` first to support `application/x-www-form-urlencoded`
+/// payloads (matching Java `URLDecoder.decode`), while preserving `%2B` as
+/// literal `+`. `Uri.decodeComponent` throws [FormatException] on malformed
+/// percent-escape sequences (e.g. `%zz`), which counts as a failure here.
 String? _tryUrlDecode(String encoded) {
   try {
-    return Uri.decodeComponent(encoded);
+    return Uri.decodeComponent(encoded.replaceAll('+', '%20'));
   } on FormatException {
     return null;
   }

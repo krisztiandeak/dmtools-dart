@@ -115,6 +115,17 @@ JIRA_LOGIN_PASS_TOKEN=cHJlYnVpbHQ=
       expect(out, contains('    missing: JIRA_API_TOKEN'));
     });
 
+    test('blank JIRA_LOGIN_PASS_TOKEN is not configured', () {
+      _writeEnv('''
+JIRA_BASE_PATH=https://test.atlassian.net
+JIRA_LOGIN_PASS_TOKEN=   
+''');
+      final out = _command().run();
+      expect(out, contains('✗ jira - Jira authentication incomplete'));
+      expect(out, contains('    missing: JIRA_EMAIL'));
+      expect(out, contains('    missing: JIRA_API_TOKEN'));
+    });
+
     test('email without token reports only the token', () {
       _writeEnv('''
 JIRA_BASE_PATH=https://test.atlassian.net
@@ -162,6 +173,27 @@ CONFLUENCE_LOGIN_PASS_TOKEN=prebuilt
         _command().run(),
         contains('✓ confluence - Confluence authentication configured'),
       );
+    });
+
+    test('blank LOGIN_PASS_TOKEN is not configured', () {
+      _writeEnv('''
+CONFLUENCE_BASE_PATH=https://test.atlassian.net/wiki
+CONFLUENCE_LOGIN_PASS_TOKEN=   
+''');
+      final out = _command().run();
+      expect(
+        out,
+        contains('✗ confluence - Confluence authentication incomplete'),
+      );
+      expect(out, contains('    missing: CONFLUENCE_EMAIL'));
+      expect(out, contains('    missing: CONFLUENCE_API_TOKEN'));
+    });
+
+    test('LOGIN_PASS_TOKEN without base path still reports base path', () {
+      _writeEnv('CONFLUENCE_LOGIN_PASS_TOKEN=prebuilt\n');
+      final out = _command().run();
+      expect(out, contains('    missing: CONFLUENCE_BASE_PATH'));
+      expect(out, isNot(contains('missing: CONFLUENCE_API_TOKEN')));
     });
   });
 }

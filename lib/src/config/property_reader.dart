@@ -68,8 +68,91 @@ class PropertyReader {
   ///
   /// Called by `JobRunner` before job execution, built from
   /// `TrackerParams.getEnvVariables()`.
+  static final _envVarTokenPattern = RegExp(
+    r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))',
+  );
+
+  /// Collected unresolved-variable warnings from the most recent
+  /// [resolveEnvVariables] call (for testing).
+  static final List<String> lastUnresolvedWarnings = [];
+
+  /// Interpolates `$VAR` and `${VAR}` tokens in [overrides] values.
+  ///
+  /// Resolution order for each referenced variable name:
+  /// 1. [extraEnv] when provided and non-empty (e.g. `workDir/dmtools.env`).
+  /// 2. Another entry in [overrides] whose value does not start with `$`.
+  /// 3. Underlying [PropertyReader] lookup (`config.properties`, `dmtools.env`,
+  ///    and OS/test environment) bypassing active overrides.
+  /// 4. Unchanged `$VAR` / `${VAR}` token when unset (`null`), logging a
+  ///    warning to `stderr` and recording it in [lastUnresolvedWarnings].
+  static Map<String, String> resolveEnvVariables(
+    Map<String, String> overrides, {
+    Map<String, String>? extraEnv,
+    String? basePath,
+  }) {
+    lastUnresolvedWarnings.clear();
+    if (overrides.isEmpty) return const <String, String>{};
+    PropertyReader? reader;
+    return {
+      for (final entry in overrides.entries)
+        entry.key: _interpolateValue(
+          entry.key,
+          entry.value,
+          overrides,
+          extraEnv,
+          () => reader ??= PropertyReader(basePath: basePath),
+        ),
+    };
+  }
+
+  static String _interpolateValue(
+    String currentKey,
+    String rawValue,
+    Map<String, String> overrides,
+    Map<String, String>? extraEnv,
+    PropertyReader Function() readerProvider,
+  ) {
+    if (!rawValue.contains(r'$')) return rawValue;
+    return rawValue.replaceAllMapped(_envVarTokenPattern, (match) {
+      final varName = (match.group(1) ?? match.group(2))!;
+      final resolved = _lookupVarForInterpolation(
+        varName,
+        currentKey,
+        overrides,
+        extraEnv,
+        readerProvider,
+      );
+      if (resolved == null) {
+        final msg =
+            'Warning: unresolved environment variable \$$varName in $currentKey';
+        lastUnresolvedWarnings.add(msg);
+        stderr.writeln(msg);
+        return match.group(0)!;
+      }
+      return resolved;
+    });
+  }
+
+  static String? _lookupVarForInterpolation(
+    String varName,
+    String currentKey,
+    Map<String, String> overrides,
+    Map<String, String>? extraEnv,
+    PropertyReader Function() readerProvider,
+  ) {
+    final extra = extraEnv?[varName];
+    if (extra != null && extra.isNotEmpty) return extra;
+    if (varName != currentKey) {
+      final sibling = overrides[varName];
+      if (sibling != null && !sibling.startsWith(r'$')) return sibling;
+    }
+    return readerProvider()._getValueWithoutOverrides(varName);
+  }
+
+  /// Sets the static environment overrides, resolving any `$VAR` / `${VAR}`
+  /// references before storing.
   static void setOverrides(Map<String, String> overrides) {
-    _overrides = overrides;
+    _overrides = resolveEnvVariables(overrides);
   }
 
   /// Clears the static overrides.
@@ -88,7 +171,7 @@ class PropertyReader {
   /// so a script's `set_env_variable('GH_TOKEN', ...)` reaches subsequent
   /// commands (and `PropertyReader.getValue` sees it, like Java).
   static void setOverride(String key, String value) {
-    _overrides = {...?_overrides, key: value};
+    _overrides = resolveEnvVariables({...?_overrides, key: value});
   }
 
   /// Runs [body] with [overrides] active for the current async context.
@@ -98,11 +181,19 @@ class PropertyReader {
   /// gets the same isolation from `ThreadLocal`).
   static Future<T> runWithOverrides<T>(
     Map<String, String> overrides,
-    Future<T> Function() body,
-  ) {
+    Future<T> Function() body, {
+    Map<String, String>? extraEnv,
+    String? basePath,
+  }) {
     return runZoned(
       body,
-      zoneValues: {_overridesZoneKey: overrides},
+      zoneValues: {
+        _overridesZoneKey: resolveEnvVariables(
+          overrides,
+          extraEnv: extraEnv,
+          basePath: basePath,
+        ),
+      },
     );
   }
 
@@ -167,6 +258,12 @@ class PropertyReader {
     if (overrides.containsKey(key)) {
       return overrides[key];
     }
+    return _getValueWithoutOverrides(key);
+  }
+
+  /// Resolves [key] across `config.properties`, `dmtools.env`, and the
+  /// OS/test environment, skipping the static/zone override map.
+  String? _getValueWithoutOverrides(String key) {
     // 2. config.properties (Java resource tier) — every file tier accepts
     //    only non-null AND non-empty values (`property != null &&
     //    !property.isEmpty()`), so empty entries fall through.

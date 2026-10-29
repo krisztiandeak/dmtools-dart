@@ -4,10 +4,9 @@
 /// `github_*` tools covered by the v1 core alias subset and emits one
 /// fixture line per site: `<github_tool> <alias> <path>:<line>`.
 ///
-/// `dart run tool/scm_alias_census.dart` regenerates
-/// `test/fixtures/scm_alias_usage_census.txt`; the gate test
-/// (`test/scm_ci_gates_test.dart`) asserts the fixture is current and
-/// that every census tool is covered by a registered alias.
+/// The gate test (`test/scm_ci_gates_test.dart`) recomputes the census
+/// live from `agents/js` and asserts every census tool is covered by a
+/// registered alias — no committed snapshot (agents/ floats on main).
 ///
 /// The scan is a plain call-shaped regex (`\bgithub_[a-z_]+\s*\(`) over
 /// `agents/js/**.js` excluding `js/unit-tests/` (harness stubs, not
@@ -70,51 +69,4 @@ List<String> computeCensus({String root = 'agents/js'}) {
     }
   }
   return lines..sort();
-}
-
-/// Writes the census fixture (repo-root relative), returning the lines.
-List<String> writeCensusFixture() {
-  final lines = computeCensus();
-  final header = [
-    '# scm_*/ci_* alias usage census (gh-339 AC2) — GENERATED FILE.',
-    '# One line per github_* call site covered by the v1 core alias',
-    '# subset: <github_tool> <alias> <path>:<line>.',
-    '# Regenerate: dart run tool/scm_alias_census.dart',
-    '# The gate compares (tool, alias, path) triples — line numbers are',
-    '# documentation only (agents/ is a foreign submodule; its repins',
-    '# shift lines constantly without changing the covered site set).',
-  ];
-  File('test/fixtures/scm_alias_usage_census.txt')
-      .writeAsStringSync('${header.join('\n')}\n${lines.join('\n')}\n');
-  return lines;
-}
-
-/// The `(tool, alias, path)` covered set of census lines — what AC2
-/// actually pins. Line numbers are stripped (and duplicates per site
-/// collapsed): `agents/` is the dmtools-agents submodule, so every
-/// routine repin shifts lines without changing the covered sites, and a
-/// line-granular comparison would turn unrelated repin PRs red.
-Set<String> censusSites(Iterable<String> lines) => {
-      for (final line in lines)
-        if (line.trim().isNotEmpty && !line.startsWith('#')) _censusSite(line),
-    };
-
-String _censusSite(String line) {
-  final parts = line.trim().split(' ');
-  return '${parts.first} ${parts[1]} ${parts.last.split(':').first}';
-}
-
-void main(List<String> args) {
-  final lines =
-      args.contains('--check') ? computeCensus() : writeCensusFixture();
-  final fixture = File('test/fixtures/scm_alias_usage_census.txt');
-  if (args.contains('--check')) {
-    final committedSites = censusSites(fixture.readAsLinesSync());
-    final computedSites = censusSites(lines);
-    final same = committedSites.length == computedSites.length &&
-        committedSites.containsAll(computedSites);
-    stdout.writeln(same ? 'census fixture is current' : 'census fixture STALE');
-    exit(same ? 0 : 1);
-  }
-  stdout.writeln('wrote ${fixture.path} (${lines.length} sites)');
 }

@@ -635,8 +635,19 @@ class FixtureTree {
       // carry everything the preload reads.
       'js/common/machineNotice.js',
       'js/configLoader.js',
+      // Preload inventory window: agents main testRunner preloads scmReal()
+      // and its gh-1248 leaf modules. Copied best-effort.
+      'js/common/reviewThreadInventory.js',
+      'js/common/githubReviewFetch.js',
+      'js/common/pullRequest.js',
+      'js/common/mergeState.js',
+      'js/common/loseJson.js',
+      'js/common/machineAuthor.js',
+      'js/common/legRunVocab.js',
+      'js/common/reviewVerdicts.js',
     ]) {
       final src = File('$agentsPath/$rel');
+      if (!src.existsSync()) continue;
       final dst = File('${root.path}/$rel');
       dst.createSync(recursive: true);
       dst.writeAsStringSync(src.readAsStringSync());

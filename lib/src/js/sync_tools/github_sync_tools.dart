@@ -26,6 +26,7 @@ import 'github_workflow_logs.dart';
 
 part 'github_issue_sync_tools.dart';
 part 'github_ci_sync_tools.dart';
+part 'github_paged_sync_tools.dart';
 
 /// Connection config for one GitHub sync call.
 typedef GhSyncConfig = ({String baseUrl, Map<String, String> headers});
@@ -142,41 +143,6 @@ String _run(
 String _getPr(GhSyncConfig c, Map<String, dynamic> a) =>
     syncBodyOrError(SyncHttpClient.get(_prUrl(c, a), headers: c.headers));
 
-/// `github_list_branches` — first page of `repos/{w}/{r}/branches`
-/// (Java `listBranches` parity; REST shape `[{name, commit: {sha}}]`).
-/// The SM provider reads the default-branch HEAD from it to compute
-/// behind/CLEAN deterministically (REST `mergeable_state` lazily
-/// recomputes to `unknown` right after a base push).
-String _listBranches(GhSyncConfig c, Map<String, dynamic> a) =>
-    syncBodyOrError(SyncHttpClient.get(
-      '${c.baseUrl}/${_repoSeg(a)}/branches?per_page=100&page=1',
-      headers: c.headers,
-    ));
-
-/// `github_list_prs` — first page (up to 100) of `repos/{w}/{r}/pulls`.
-///
-/// Java `listPullRequests`/`pullRequests`: state synonyms are normalized
-/// (`opened`→`open`, `declined`/`merged`→`closed`) and `state=merged`
-/// keeps only PRs with a `merged_at` timestamp.
-String _listPrs(GhSyncConfig c, Map<String, dynamic> a) {
-  final requested = syncAsStr(a['state']).trim().toLowerCase();
-  final normalized = switch (requested) {
-    'opened' => 'open',
-    'declined' || 'merged' => 'closed',
-    _ => requested,
-  };
-  final url = '${c.baseUrl}/${_repoSeg(a)}/pulls'
-      '?state=$normalized&sort=updated&direction=desc&per_page=100&page=1';
-  final resp = SyncHttpClient.get(url, headers: c.headers);
-  final body = syncBodyOrError(resp);
-  if (requested != 'merged' || !resp.isOk) return body;
-  final decoded = syncTryDecode(body);
-  final prs = decoded is List ? decoded : const [];
-  final merged =
-      prs.where((pr) => pr is Map && pr['merged_at'] != null).toList();
-  return jsonEncode(merged);
-}
-
 /// `github_add_pr_comment` — POST `repos/{w}/{r}/issues/{id}/comments`.
 String _addPrComment(GhSyncConfig c, Map<String, dynamic> a) =>
     _postIssueComment(c, a, a['text']);
@@ -237,10 +203,11 @@ String _getPrDiff(GhSyncConfig c, Map<String, dynamic> a) {
   return jsonEncode(_parseDiffStats(diff));
 }
 
-/// `github_get_pr_diff_text` — raw unified diff text (Java parity).
+/// `github_get_pr_diff_text` — raw unified diff text (Java parity),
+/// JSON-encoded for the FFI bridge (plain text breaks the host callback).
 String _getPrDiffText(GhSyncConfig c, Map<String, dynamic> a) {
-  if (!PropertyReader().isReadPullRequestDiff()) return '';
-  return _fetchPrDiff(c, a) ?? '';
+  if (!PropertyReader().isReadPullRequestDiff()) return jsonEncode('');
+  return jsonEncode(_fetchPrDiff(c, a) ?? '');
 }
 
 /// GETs `pulls/{id}` with the `application/vnd.github.diff` accept header.
@@ -453,53 +420,27 @@ String _graphQl(
 
 // ── Commits, checks, Actions ───────────────────────────────────────────
 
-/// `github_get_commit_check_runs` — GET `commits/{sha}/check-runs`,
-/// walking every page (per_page=100). Heads accumulate check-runs
-/// across CI re-runs and SM bridge-free stamps (live: fa #1457's head
-/// carried 355 — the default 30-run page hid the in_progress
-/// placeholder orphans from every SM detector; dmtools-agents#865).
-/// Java's `GitHub.java:1135` has the same single-page blind spot; the
-/// fix lands here first because the fleet's SM runs the Dart CLI.
-/// Non-paged shapes (echo stubs, error bodies) pass through untouched.
-String _getCommitCheckRuns(GhSyncConfig c, Map<String, dynamic> a) {
-  final base = '${c.baseUrl}/${_repoSeg(a)}'
-      '/commits/${syncAsStr(a['commitSha'])}/check-runs?per_page=100';
-  final first = SyncHttpClient.get('$base&page=1', headers: c.headers);
-  if (!first.isOk) return syncBodyOrError(first);
-  final decoded = syncTryDecode(first.body);
-  final firstPage = decoded is Map ? decoded['check_runs'] : null;
-  if (firstPage is! List || firstPage.length < 100) {
-    return syncBodyOrError(first);
-  }
-  return jsonEncode({
-    'total_count': decoded['total_count'],
-    'check_runs': _walkCheckRunPages(c, base, firstPage),
-  });
-}
-
-/// Appends every remaining check-runs page to [firstPage]; a short or
-/// undecodable page ends the walk (later-page failures degrade to the
-/// pages already collected, never to an error the caller must parse).
-List<dynamic> _walkCheckRunPages(
-    GhSyncConfig c, String base, List<dynamic> firstPage) {
-  final runs = <dynamic>[...firstPage];
-  for (var page = 2;; page++) {
-    final next = _getJson(c, '$base&page=$page');
-    if (next is! Map || next['check_runs'] is! List) break;
-    final items = next['check_runs'] as List;
-    runs.addAll(items);
-    if (items.length < 100) break;
-  }
-  return runs;
-}
-
 /// `github_get_job_logs` — raw text logs from `actions/jobs/{id}/logs`.
-String _getJobLogs(GhSyncConfig c, Map<String, dynamic> a) =>
-    _getRepoPath(c, a, 'actions/jobs/${syncAsStr(a['jobId'])}/logs');
-
-/// `github_get_workflow_run_jobs` — GET `actions/runs/{id}/jobs`.
-String _getWorkflowRunJobs(GhSyncConfig c, Map<String, dynamic> a) =>
-    _getRepoPath(c, a, 'actions/runs/${syncAsStr(a['runId'])}/jobs');
+///
+/// The endpoint answers plain text, not JSON; the FFI host callback
+/// marshals through JSON, so the body must be returned JSON-encoded
+/// (same contract as [_triggerWorkflow]'s plain-string success message).
+/// Live 2026-10-17: an unencoded log body broke the bridge with "host
+/// callback returned invalid JSON" and left rework legs blind (no
+/// ci_failures_full.log) — dart #414 burned its 3-round rework cap.
+String _getJobLogs(GhSyncConfig c, Map<String, dynamic> a) {
+  final body = syncBodyOrError(SyncHttpClient.get(
+    '${c.baseUrl}/${_repoSeg(a)}/actions/jobs/${syncAsStr(a['jobId'])}/logs',
+    headers: c.headers,
+    // The endpoint 302s to a signed blob URL; without following it the
+    // body is empty ("job log came back empty", rework legs blind).
+    // curl -L and Dart HttpClient both drop Authorization cross-origin.
+    followRedirects: true,
+  ));
+  // Always JSON-encode (Java parity: the raw string, even an error body);
+  // the JS side try-parses and falls back to the raw string.
+  return jsonEncode(body);
+}
 
 /// `github_list_workflow_runs` — GET `actions/runs` (or a workflow's
 /// runs) with the optional `status`/`per_page`/`page`/`created` filters.
@@ -701,16 +642,6 @@ String _submitPrReview(GhSyncConfig c, Map<String, dynamic> a) {
     );
   }
   return resp.body;
-}
-
-/// `github_list_pr_reviews` — GET `repos/{w}/{r}/pulls/{id}/reviews`
-/// (Java #495). An empty response comes back as `[]` (Java parity).
-String _listPrReviews(GhSyncConfig c, Map<String, dynamic> a) {
-  final resp =
-      SyncHttpClient.get('${_prUrl(c, a)}/reviews', headers: c.headers);
-  final body = syncBodyOrError(resp);
-  if (!resp.isOk) return body;
-  return body.trim().isEmpty ? '[]' : body;
 }
 
 /// `github_dismiss_pr_review` — PUT

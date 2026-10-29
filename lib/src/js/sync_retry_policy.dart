@@ -26,6 +26,8 @@ library;
 import 'dart:io' show Platform;
 import 'dart:math';
 
+import '../config/property_reader.dart';
+
 /// Immutable retry policy; all delay math is pure and testable.
 class SyncRetryPolicy {
   /// Total attempt budget, mirroring Java `maxRetries` (the loop runs while
@@ -103,13 +105,24 @@ class SyncRetryPolicy {
       );
 
   /// Java `RetryPolicyConfig.fromEnvironment`; [get] resolves `JIRA_RETRY_*`
-  /// values (defaults to `Platform.environment` when omitted).
+  /// values (defaults to [PropertyReader.getOverrides], then
+  /// [PropertyReader.testEnvironment] under [PropertyReader.testIsolation],
+  /// then [Platform.environment]).
   factory SyncRetryPolicy.fromEnvironment(
           [String? Function(String key)? get, Random? random]) =>
       SyncRetryPolicy.fromEnvMap(
-        (key) => get?.call(key) ?? Platform.environment[key],
+        (key) => get?.call(key) ?? _defaultLookup(key),
         random,
       );
+
+  static String? _defaultLookup(String key) {
+    final overrides = PropertyReader.getOverrides();
+    if (overrides.containsKey(key)) return overrides[key];
+    if (PropertyReader.testIsolation) {
+      return PropertyReader.testEnvironment[key];
+    }
+    return Platform.environment[key];
+  }
 
   /// Java `RetryPolicyConfig` semantics over an explicit key/value lookup.
   factory SyncRetryPolicy.fromEnvMap(String? Function(String) get,
@@ -196,8 +209,9 @@ class SyncRetryPolicy {
       [Map<String, String> headers = const {}, int statusCode = 0]) {
     final server = _serverDelayMs(headers, DateTime.now(), statusCode);
     if (server == null) return null; // Retry-After over the cap: abort
-    if (server.ms > 0)
+    if (server.present) {
       return server.jittered ? _addJitter(server.ms) : server.ms;
+    }
     return _addJitter(
       min(
         maxDelayMs,
@@ -215,8 +229,8 @@ class SyncRetryPolicy {
   /// `null` aborts (non-rate-limit `Retry-After` above
   /// [maxRetryAfterSeconds]); otherwise the milliseconds to wait plus
   /// whether the Java branch applies jitter to it (`Retry-After` does,
-  /// `X-RateLimit-Reset` does not). `(0, jittered: false)` = no server
-  /// header applies — fall through to exponential backoff.
+  /// `X-RateLimit-Reset` does not). `(ms: 0, jittered: false, present: false)`
+  /// = no server header applies — fall through to exponential backoff.
   _ServerDelay? _serverDelayMs(
       Map<String, String> headers, DateTime now, int statusCode) {
     final retryAfter = _header(headers, 'retry-after');
@@ -237,11 +251,12 @@ class SyncRetryPolicy {
             ms: min(
                 delay + _msPerSecond, rateLimitMaxWaitSeconds * _msPerSecond),
             jittered: false,
+            present: true,
           );
         }
       }
     }
-    return const (ms: 0, jittered: false);
+    return const (ms: 0, jittered: false, present: false);
   }
 
   /// Java `Retry-After` branch: aborts (`null`) when a non-429 wait exceeds
@@ -252,7 +267,7 @@ class SyncRetryPolicy {
     if (!rateLimited && seconds > maxRetryAfterSeconds) return null; // abort
     var ms = seconds * _msPerSecond;
     if (rateLimited) ms = min(ms, rateLimitMaxWaitSeconds * _msPerSecond);
-    return (ms: ms, jittered: true);
+    return (ms: ms, jittered: true, present: true);
   }
 
   /// Case-insensitive [name] lookup over [headers].
@@ -292,7 +307,7 @@ class SyncRetryPolicy {
 /// Server-mandated delay outcome: the milliseconds to wait plus whether
 /// Java jitters that branch (`Retry-After` is jittered, `X-RateLimit-Reset`
 /// is returned verbatim).
-typedef _ServerDelay = ({int ms, bool jittered});
+typedef _ServerDelay = ({int ms, bool jittered, bool present});
 
 /// Jitter-neutral [Random] used as the const default (always returns the
 /// 0.5 midpoint so `addJitter` is a no-op); the factories override it with

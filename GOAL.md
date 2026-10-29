@@ -17,6 +17,8 @@ vendored or patched locally inside dmtools-dart.
 
 ## Reference implementation (source of truth)
 
+> Reviewers: any claim about Java behavior must be checked against a fresh clone of https://github.com/epam/dm.ai and cited as `path/File.java:NN` — see `.dmtools/instructions/java_parity.md`.
+
 **Java DMTools: https://github.com/epam/dm.ai** — always the latest upstream; clone
 it fresh and treat its source as the spec for behavior and signatures. Do not rely
 on any local checkout paths.

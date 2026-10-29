@@ -6,6 +6,8 @@ import 'package:dmtools/src/js/sync_http_client.dart';
 import 'package:dmtools/src/js/sync_tools/jira_sync_tools.dart';
 import 'package:test/test.dart';
 
+part 'jira_sync_tools_labels.dart';
+
 /// Shared fixtures for the fixture-server groups (each group's setUp
 /// rebinds the server and tools).
 late JiraFixtureServer server;
@@ -27,6 +29,7 @@ void main() {
   _testDispatchErrors();
   if (hasPython3()) {
     _testNewWriteTools();
+    _testCreateLabels();
     _testLinkIssues();
     _testAttachFile();
     _testFieldCustomCode();
@@ -76,6 +79,7 @@ void configureJira(JiraFixtureServer server, {String token = 'tok'}) {
     'JIRA_BASE_PATH': 'http://127.0.0.1:${server.port}',
     'JIRA_LOGIN_PASS_TOKEN': token,
     'JIRA_AUTH_TYPE': 'Basic',
+    'JIRA_RETRY_ENABLED': 'false',
   });
 }
 

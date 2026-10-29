@@ -66,17 +66,48 @@ class GithubClient {
 
   /// `github_list_prs` — GET `/repos/{owner}/{repo}/pulls`.
   ///
-  /// [state] defaults to `open` (GitHub's default) when omitted.
+  /// [state] defaults to `open` (GitHub's default) when omitted. `open`
+  /// walks every page (gh-388: open counts are bounded and SM sweeps need
+  /// completeness); other states return the first page (up to 100) only.
   Future<List<Map<String, dynamic>>> listPrs(
     String owner,
     String repo, [
     String? state,
   ]) async {
+    final query = {'state': state ?? 'open'};
+    final path = 'repos/$owner/$repo/pulls';
+    if (query['state'] == 'open') return _pagesFrom(path, 1, query);
     final body = await _http.get(
-      'repos/$owner/$repo/pulls',
-      queryParams: {'state': state ?? 'open'},
+      path,
+      queryParams: {...query, 'per_page': '100', 'page': '1'},
     );
     return _decodeList(body);
+  }
+
+  /// GETs every `per_page=100` page (from [startPage]) of the JSON-array endpoint [path]
+  /// (gh-388): stops on a short or empty page; a later-page failure
+  /// keeps the pages already collected.
+  Future<List<Map<String, dynamic>>> _pagesFrom(
+    String path,
+    int startPage, [
+    Map<String, String> query = const {},
+  ]) async {
+    final out = <Map<String, dynamic>>[];
+    for (var page = startPage;; page++) {
+      final List<Map<String, dynamic>> items;
+      try {
+        items = _decodeList(await _http.get(
+          path,
+          queryParams: {...query, 'per_page': '100', 'page': '$page'},
+        ));
+      } on Object {
+        if (page == 1) rethrow;
+        break;
+      }
+      out.addAll(items);
+      if (items.length < 100) break;
+    }
+    return out;
   }
 
   /// `github_create_comment` — POST `/repos/{owner}/{repo}/issues/{number}/comments`.
@@ -181,13 +212,15 @@ class GithubClient {
     String repository,
     String pullRequestId,
   ) async {
-    final body = await _http
-        .get('repos/$workspace/$repository/pulls/$pullRequestId/reviews');
+    final path = 'repos/$workspace/$repository/pulls/$pullRequestId/reviews';
+    final body =
+        await _http.get(path, queryParams: {'per_page': '100', 'page': '1'});
     if (body.trim().isEmpty) return const [];
     final decoded = jsonDecode(body);
-    return decoded is List
-        ? decoded.cast<Map<String, dynamic>>().toList()
-        : const [];
+    if (decoded is! List) return const [];
+    final first = decoded.cast<Map<String, dynamic>>().toList();
+    if (first.length < 100) return first;
+    return [...first, ...await _pagesFrom(path, 2)];
   }
 
   /// `github_dismiss_pr_review` — PUT
@@ -312,13 +345,12 @@ class GithubClient {
     return jsonDecode(response) as Map<String, dynamic>;
   }
 
-  /// `github_list_branches` — GET `/repos/{owner}/{repo}/branches`.
+  /// `github_list_branches` — every page of `/repos/{owner}/{repo}/branches`.
   Future<List<Map<String, dynamic>>> listBranches(
     String owner,
     String repo,
   ) async {
-    final body = await _http.get('repos/$owner/$repo/branches');
-    return _decodeList(body);
+    return _pagesFrom('repos/$owner/$repo/branches', 1);
   }
 
   /// `github_create_branch` — POST `/repos/{owner}/{repo}/git/refs`.

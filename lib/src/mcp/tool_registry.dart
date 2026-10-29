@@ -19,6 +19,7 @@ final RegExp _adoKeyHint = RegExp(r'^\d+$');
 class ToolRegistry {
   final Map<String, ToolDefinition> _tools = {};
   final Map<String, String> _aliasToName = {};
+  List<ToolDefinition>? _sortedTools;
 
   /// Registers a tool definition.
   ///
@@ -26,6 +27,7 @@ class ToolRegistry {
   /// Each alias in [ToolDefinition.aliases] is mapped to the tool name,
   /// overwriting any earlier alias binding.
   void register(ToolDefinition tool) {
+    _sortedTools = null;
     _tools[tool.name] = tool;
     for (final alias in tool.aliases) {
       _aliasToName[alias] = tool.name;
@@ -194,8 +196,8 @@ class ToolRegistry {
   }
 
   /// Returns all registered tools, sorted alphabetically by name.
-  List<ToolDefinition> get allTools =>
-      _tools.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+  List<ToolDefinition> get allTools => _sortedTools ??= List.unmodifiable(
+      _tools.values.toList()..sort((a, b) => a.name.compareTo(b.name)));
 
   /// Returns tools for the given integrations, or all when [integrations]
   /// is `null`. Results are sorted alphabetically by name.
@@ -240,6 +242,7 @@ class ToolRegistry {
 
   /// Clears all registered tools and aliases (for testing).
   void clear() {
+    _sortedTools = null;
     _tools.clear();
     _aliasToName.clear();
   }

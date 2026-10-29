@@ -295,7 +295,7 @@ ToolParam _ghOptionalPrId() => const ToolParam(
       name: 'pullRequestId',
       description: 'The issue or pull request number',
       required: false,
-      aliases: ['number'],
+      aliases: ['number', 'issueNumber'],
     );
 
 /// The composite issue `key` parameter for [alternative] parameter names.

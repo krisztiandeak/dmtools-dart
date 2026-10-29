@@ -52,6 +52,7 @@ ToolDefinition _createWorkItemTool() => _opTool(
           name: 'description',
           description: 'The work item description (HTML)',
           required: false,
+          aliases: ['body'],
         ),
         ToolParam(
           name: 'fieldsJson',
@@ -76,7 +77,8 @@ ToolDefinition _createWorkItemTool() => _opTool(
 List<ToolDefinition> _ticketOpTools() => [
       _opTool('ado_move_to_state', 'Move a work item to a specific state', [
         _workItemId(),
-        _req('state', 'The target state name', aliases: ['statusName']),
+        _req('state', 'The target state name',
+            aliases: ['statusName', 'status']),
       ], aliases: [
         'tracker_move_to_status'
       ]),

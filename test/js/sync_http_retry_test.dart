@@ -76,6 +76,21 @@ void deterministicRetryTests() {
   });
 }
 
+String? _throttleOnEnv(String k) => switch (k) {
+      'JIRA_WAIT_BEFORE_PERFORM' => 'true',
+      'SLEEP_TIME_REQUEST' => '1500',
+      _ => null,
+    };
+
+String? _throttleDefaultEnv(String k) =>
+    k == 'JIRA_WAIT_BEFORE_PERFORM' ? 'true' : null;
+
+String? _throttleOffEnv(String k) => switch (k) {
+      'JIRA_WAIT_BEFORE_PERFORM' => 'false',
+      'SLEEP_TIME_REQUEST' => '1500',
+      _ => null,
+    };
+
 void policyConfigTests() {
   group('SyncRetryPolicy configuration', () {
     test('cloud policy matches RetryPolicyConfig.forJiraCloud', () {
@@ -103,24 +118,13 @@ void policyConfigTests() {
 
     test('JIRA_WAIT_BEFORE_PERFORM + SLEEP_TIME_REQUEST drive the throttle',
         () {
-      final policy = SyncRetryPolicy.fromEnvMap((k) => switch (k) {
-            'JIRA_WAIT_BEFORE_PERFORM' => 'true',
-            'SLEEP_TIME_REQUEST' => '1500',
-            _ => null,
-          });
+      final policy = SyncRetryPolicy.fromEnvMap(_throttleOnEnv);
       expect(policy.waitBeforePerform, isTrue);
       expect(policy.sleepTimeRequestMs, 1500);
       expect(policy.performDelayMs, 1500);
-      final disabled = SyncRetryPolicy.fromEnvMap((k) => switch (k) {
-            'JIRA_WAIT_BEFORE_PERFORM' => 'true',
-            _ => null,
-          });
+      final disabled = SyncRetryPolicy.fromEnvMap(_throttleDefaultEnv);
       expect(disabled.performDelayMs, 300); // SLEEP_TIME_REQUEST default
-      final off = SyncRetryPolicy.fromEnvMap((k) => switch (k) {
-            'JIRA_WAIT_BEFORE_PERFORM' => 'false',
-            'SLEEP_TIME_REQUEST' => '1500',
-            _ => null,
-          });
+      final off = SyncRetryPolicy.fromEnvMap(_throttleOffEnv);
       expect(off.performDelayMs, 0);
     });
   });
@@ -227,6 +231,7 @@ void delayMathTests() {
     test('Retry-After header overrides the backoff', () {
       expect(policy.statusDelayMs(1, {'Retry-After': '2'}), 2000);
       expect(policy.statusDelayMs(3, {'retry-after': '1'}), 1000);
+      expect(policy.statusDelayMs(3, {'Retry-After': '0'}), 0);
     });
 
     test('Retry-After above 300s aborts (null)', () {

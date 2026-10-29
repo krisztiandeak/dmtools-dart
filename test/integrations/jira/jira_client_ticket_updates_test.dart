@@ -15,8 +15,10 @@ void main() {
   getSubtasksTests();
   updateDescriptionTests();
   createTicketWithParentTests();
+  createTicketWithParentLabelsTests();
   updateTicketParentTests();
   ticketUpdatesExecutorDispatchTests();
+  ticketUpdatesExecutorLabelsTests();
 }
 
 /// `jira_set_fix_version` — PUT `issue/{key}` with fixVersions field.
@@ -135,6 +137,41 @@ void createTicketWithParentTests() {
   });
 }
 
+/// gh-427 AC1/E1: `labels` mapping on [JiraClient.createTicketWithParent].
+void createTicketWithParentLabelsTests() {
+  group('JiraClient.createTicketWithParent labels', () {
+    test('maps labels into the create payload', () async {
+      final f = mockJira((o) => routeByPath({'/issue': _createdBody}, o));
+      await f.client.createTicketWithParent(
+        'PROJ',
+        'Sub-task',
+        'Title',
+        'PROJ-1',
+        'Desc',
+        ['development', 'ai_repo_task'],
+      );
+      final decoded = jsonDecode(f.adapter.calls.single.data as String) as Map;
+      expect(decoded['fields']['labels'], ['development', 'ai_repo_task']);
+    });
+
+    test('omits the labels key when the list is empty', () async {
+      // gh-427 E1: an empty list keeps the label-less wire shape.
+      final f = mockJira((o) => routeByPath({'/issue': _createdBody}, o));
+      await f.client.createTicketWithParent(
+        'PROJ',
+        'Sub-task',
+        'Title',
+        'PROJ-1',
+        null,
+        [],
+      );
+      final fields =
+          (jsonDecode(f.adapter.calls.single.data as String) as Map)['fields'];
+      expect(fields.containsKey('labels'), isFalse);
+    });
+  });
+}
+
 /// `jira_update_ticket_parent` — PUT `issue/{key}` with the parent field.
 void updateTicketParentTests() {
   group('JiraClient.updateTicketParent', () {
@@ -212,6 +249,33 @@ void ticketUpdatesExecutorDispatchTests() {
   });
 }
 
+/// gh-427 AC5: with_parent labels validation precedes the parent fetch.
+void ticketUpdatesExecutorLabelsTests() {
+  group('JiraToolExecutor.execute with_parent labels validation', () {
+    late _SpyJiraClient spy;
+    late JiraToolExecutor executor;
+
+    setUp(() {
+      spy = _SpyJiraClient(mockHttp((o) => '{}').http);
+      executor = JiraToolExecutor(spy);
+    });
+
+    test('rejects a malformed labels arg with no HTTP', () async {
+      await expectLater(
+        () => executor.execute('jira_create_ticket_with_parent', {
+          'project': 'PROJ',
+          'issueType': 'Task',
+          'summary': 'Title',
+          'parentKey': 'PROJ-1',
+          'labels': [42],
+        }),
+        throwsArgumentError,
+      );
+      expect(spy.calls, isEmpty);
+    });
+  });
+}
+
 /// Records every dispatched call then delegates to the real client logic.
 class _SpyJiraClient extends JiraClient {
   _SpyJiraClient(super.http);
@@ -255,6 +319,7 @@ class _SpyJiraClient extends JiraClient {
     String summary,
     String parentKey, [
     String? description,
+    List<String>? labels,
   ]) {
     calls.add('createTicketWithParent:$project:$issueType:$summary:$parentKey');
     return super.createTicketWithParent(
@@ -263,6 +328,7 @@ class _SpyJiraClient extends JiraClient {
       summary,
       parentKey,
       description,
+      labels,
     );
   }
 }

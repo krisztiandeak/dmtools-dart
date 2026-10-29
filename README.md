@@ -3,6 +3,7 @@
 ![tests](.badges/tests.svg)
 ![coverage](.badges/coverage.svg)
 ![crap4dart](.badges/crap4dart.svg)
+![memory](.badges/memory.svg)
 
 Pure Dart port of [DMTools](https://github.com/epam/dm.ai) — the enterprise
 dark-factory orchestrator (Jira, ADO, GitHub, GitLab, Confluence, TestRail,

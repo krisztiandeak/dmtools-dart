@@ -268,12 +268,14 @@ class JiraClient {
   /// `jira_create_ticket` — POST `/rest/api/latest/issue`.
   ///
   /// Creates a ticket in [project] with the given [issueType] name and
-  /// [summary]; [description] is included only when provided.
+  /// [summary]; [description] is included only when provided. [labels] lands
+  /// in `fields.labels` only when non-empty (gh-427).
   Future<Map<String, dynamic>> createTicketBasic(
     String project,
     String issueType,
     String summary, [
     String? description,
+    List<String>? labels,
   ]) async {
     final fields = <String, dynamic>{
       'project': {'key': project},
@@ -281,6 +283,7 @@ class JiraClient {
       'summary': summary,
     };
     if (description != null) fields['description'] = description;
+    if (labels != null && labels.isNotEmpty) fields['labels'] = labels;
     final body =
         await _http.post('issue', body: jsonEncode({'fields': fields}));
     return _decodeMap(body);
@@ -375,12 +378,14 @@ class JiraClient {
   ///
   /// Creates a ticket in [project] with a parent link to [parentKey];
   /// [description] is included when provided (Java signature parity).
+  /// [labels] lands in `fields.labels` only when non-empty (gh-427).
   Future<Map<String, dynamic>> createTicketWithParent(
     String project,
     String issueType,
     String summary,
     String parentKey, [
     String? description,
+    List<String>? labels,
   ]) async {
     final fields = <String, dynamic>{
       'project': {'key': project},
@@ -391,6 +396,7 @@ class JiraClient {
     if (description != null && description.isNotEmpty) {
       fields['description'] = description;
     }
+    if (labels != null && labels.isNotEmpty) fields['labels'] = labels;
     final body =
         await _http.post('issue', body: jsonEncode({'fields': fields}));
     return _decodeMap(body);

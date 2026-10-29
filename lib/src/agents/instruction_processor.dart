@@ -69,7 +69,13 @@ class InstructionProcessor {
       final file = File(resolved);
       if (!file.existsSync()) return path;
       try {
-        return '<file path="$path">\n${file.readAsStringSync()}\n</file>';
+        // Minimal basename header, not a <file path="..."> wrapper: pack
+        // configs inline up to a dozen instruction files and the absolute
+        // runner path (~110 chars each) is pure prompt-token bloat (the
+        // Java InstructionProcessor inlines bare content; cross-file
+        // references like "see tdd_approach.md" only need the basename).
+        final basename = path.replaceAll('\\', '/').split('/').last;
+        return '## $basename\n${file.readAsStringSync()}';
       } catch (_) {
         return path;
       }

@@ -220,6 +220,7 @@ void testjoblisttools_p5() {
     expect(curlPaths.single, contains('scope%5B%5D=running'));
 
     await SyncHttpBridge.shared.boot();
+    addTearDown(SyncHttpBridge.shared.dispose);
     tools.handlers['gitlab_list_project_jobs']!({
       'workspace': 'g',
       'repository': 'r',

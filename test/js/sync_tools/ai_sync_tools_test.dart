@@ -571,6 +571,7 @@ void _testTransportFailures() {
       PropertyReader.setOverrides({
         'OPENAI_API_KEY': 'oai-test-key',
         'OPENAI_BASE_PATH': 'http://127.0.0.1:1/v1/chat/completions',
+        'JIRA_RETRY_ENABLED': 'false',
       });
       final result = AiSyncTools(PropertyReader())
           .handlers['openai_ai_chat']!({'message': 'hi'});

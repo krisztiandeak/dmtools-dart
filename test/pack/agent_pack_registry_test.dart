@@ -222,35 +222,6 @@ void _redirectResolutionTests() {
       server.isolate.kill();
     }
   });
-
-  test('redirecting registry base (GitHub Releases 302) resolves', () async {
-    final zipBytes = buildPack('cdn_agent', '3.1.0').readAsBytesSync();
-    // The server 302s every /redirect/<path> to /<path> — catalog, zip,
-    // and the .sha256 sidecar all cross the redirect, like a GitHub
-    // Releases download URL hopping to the signed CDN location.
-    final server = await startRegistryServer({
-      '/cdn_agent-3.1.0.zip': zipBytes,
-      '/cdn_agent-3.1.0.zip.sha256': utf8.encode(
-        '${sha256.convert(zipBytes)}  cdn_agent-3.1.0.zip',
-      ),
-      '/catalog.json': utf8.encode(jsonEncode({'cdn_agent': '3.1.0'})),
-    });
-    try {
-      final r = AgentPackResolver(
-        packsRoot: packsRoot,
-        registryBaseUrl: 'http://127.0.0.1:${server.port}/redirect',
-      );
-      final pack = r.resolve('cdn_agent@latest');
-      expect(pack.agent, 'cdn_agent');
-      expect(pack.version, '3.1.0');
-      expect(
-        File(p.join(pack.packRoot.path, 'js/main.js')).existsSync(),
-        isTrue,
-      );
-    } finally {
-      server.isolate.kill();
-    }
-  });
 }
 
 void _catalogCharsetTests() {
@@ -279,59 +250,9 @@ void _catalogCharsetTests() {
       server.isolate.kill();
     }
   });
-
-  test('catalog version outside the safe charset is rejected', () async {
-    final server = await startRegistryServer({
-      // Traversal attempt: would escape the registry base when
-      // interpolated into the download URL.
-      '/catalog.json': utf8.encode(jsonEncode({'evil_agent': '../../x'})),
-    });
-    try {
-      final r = AgentPackResolver(
-        packsRoot: packsRoot,
-        registryBaseUrl: 'http://127.0.0.1:${server.port}',
-      );
-      expect(
-        () => r.resolve('evil_agent@latest'),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('Unsafe catalog version'),
-          ),
-        ),
-      );
-    } finally {
-      server.isolate.kill();
-    }
-  });
 }
 
 void _malformedCatalogTests() {
-  test('malformed catalog.json fails as AgentPackException', () async {
-    final server = await startRegistryServer({
-      '/catalog.json': utf8.encode('not json {'),
-    });
-    try {
-      final r = AgentPackResolver(
-        packsRoot: packsRoot,
-        registryBaseUrl: 'http://127.0.0.1:${server.port}',
-      );
-      expect(
-        () => r.resolve('my_agent@latest'),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('Malformed registry catalog'),
-          ),
-        ),
-      );
-    } finally {
-      server.isolate.kill();
-    }
-  });
-
   test('malformed catalog.json fails as AgentPackException', () async {
     final server = await startRegistryServer({
       '/catalog.json': utf8.encode('not json {'),

@@ -66,7 +66,10 @@ const _testJiraConfig = {
 /// fake server should return; served requests land in `fixture.adapter.calls`.
 MockXrayFixture mockXray(String Function(RequestOptions options) router) {
   final httpFix = mockXrayHttp(router);
-  return (client: XrayClient(httpFix.http), adapter: httpFix.adapter);
+  return (
+    client: XrayClient(httpFix.http, syncDelay: Duration.zero),
+    adapter: httpFix.adapter,
+  );
 }
 
 /// Builds an [XrayHttpClient] over a mocked [Dio] routed by [router].
@@ -110,7 +113,11 @@ MockXrayJiraFixture mockXrayWithJira(
   final jiraClient = JiraClient(
     JiraHttpClient(PropertyReader(), dio: Dio()..httpClientAdapter = jira),
   );
-  return (client: XrayClient(http, jira: jiraClient), xray: xray, jira: jira);
+  return (
+    client: XrayClient(http, jira: jiraClient, syncDelay: Duration.zero),
+    xray: xray,
+    jira: jira,
+  );
 }
 
 /// Routes by request-path suffix, defaulting to [fallback].

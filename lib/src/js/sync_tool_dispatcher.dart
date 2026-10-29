@@ -34,6 +34,7 @@ import 'sync_tools/gitlab_sync_tools.dart';
 import 'sync_tools/jenkins_sync_tools.dart';
 import 'sync_tools/jira_sync_tools.dart';
 import 'sync_tools/scm_ci_sync_tools.dart';
+import '../integrations/env/env_tools.dart';
 
 /// Executor for a non-HTTP (file/CLI) tool call: receives the raw [toolName]
 /// and [args], returns the JSON result string.
@@ -60,10 +61,8 @@ class SyncToolDispatcher {
   ///
   /// The optional [nonHttpHandler] receives `file_*` and `cli_*` tool calls
   /// so the dispatcher can serve as a single routing entry point.
-  SyncToolDispatcher(
-    this._reader, {
-    SyncNonHttpHandler? nonHttpHandler,
-  }) : _nonHttpHandler = nonHttpHandler;
+  SyncToolDispatcher(this._reader, {SyncNonHttpHandler? nonHttpHandler})
+      : _nonHttpHandler = nonHttpHandler;
 
   /// Confluence tools; built lazily on the first `confluence_*` dispatch.
   late final ConfluenceSyncTools _confluence = ConfluenceSyncTools(_reader);
@@ -97,8 +96,12 @@ class SyncToolDispatcher {
     MapEntry('jenkins_', _jenkins.dispatch),
     MapEntry('figma_', _figma.dispatch),
     MapEntry('scm_', _viaHandlers('scm', _scmCi.handlers)),
+    MapEntry('env_', _viaHandlers('env', _envTools.handlers)),
     MapEntry('ci_', _viaHandlers('ci', _scmCi.handlers)),
   ];
+
+  /// Secret-aware configuration reads (`env_get` / `env_list`).
+  final EnvTools _envTools = EnvTools();
 
   /// GitHub executors, mirroring [GitHubSyncTools.handlers].
   late final _githubHandlers = const GitHubSyncTools().handlers;

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dmtools/dmtools.dart';
 import 'package:test/test.dart';
@@ -40,6 +41,7 @@ void main() {
   _testStoryPointsAutoDetect();
   _testCsvSetParsing();
   _testResetForTesting();
+  _testResolveEnvVariables();
 }
 
 void _testOverrides() {
@@ -730,6 +732,64 @@ void _testResetForTesting() {
       expect(reader.getValue('A'), '1');
       reader.resetForTesting();
       expect(reader.getValue('A'), '1');
+    });
+  });
+}
+
+void _testResolveEnvVariables() {
+  group('resolveEnvVariables', () {
+    tearDown(() => PropertyReader.testEnvironment.clear());
+
+    test('interpolates \$VAR and \${VAR} from environment and leaves unset',
+        () {
+      PropertyReader.testEnvironment['ENV_VAR_DEV_QUEUE'] = '[{"p":"copilot"}]';
+      PropertyReader.testEnvironment['HOST'] = 'example.com';
+      PropertyReader.setOverrides({
+        'FA_PROVIDERS_QUEUE': r'$ENV_VAR_DEV_QUEUE',
+        'URL': r'https://${HOST}/api/$UNSET_TOKEN',
+        'LITERAL': 'github',
+      });
+      expect(
+        PropertyReader.getOverrides()['FA_PROVIDERS_QUEUE'],
+        '[{"p":"copilot"}]',
+      );
+      expect(
+        PropertyReader.getOverrides()['URL'],
+        r'https://example.com/api/$UNSET_TOKEN',
+      );
+      expect(
+        PropertyReader.lastUnresolvedWarnings,
+        contains(
+          'Warning: unresolved environment variable \$UNSET_TOKEN in URL',
+        ),
+      );
+      expect(PropertyReader.getOverrides()['LITERAL'], 'github');
+    });
+
+    test('resolves from extraEnv, sibling overrides, and basePath dmtools.env',
+        () {
+      final tmp = Directory.systemTemp.createTempSync('prop_resolve_test');
+      try {
+        File('${tmp.path}/dmtools.env')
+            .writeAsStringSync('FROM_FILE=file-val\n');
+        final resolved = PropertyReader.resolveEnvVariables(
+          {
+            'SIBLING_SRC': 'sibling-val',
+            'USE_SIBLING': r'$SIBLING_SRC',
+            'USE_EXTRA': r'${FROM_EXTRA}',
+            'USE_FILE': r'$FROM_FILE',
+            'SELF_REF': r'$SELF_REF',
+          },
+          extraEnv: {'FROM_EXTRA': 'extra-val'},
+          basePath: tmp.path,
+        );
+        expect(resolved['USE_SIBLING'], 'sibling-val');
+        expect(resolved['USE_EXTRA'], 'extra-val');
+        expect(resolved['USE_FILE'], 'file-val');
+        expect(resolved['SELF_REF'], r'$SELF_REF');
+      } finally {
+        tmp.deleteSync(recursive: true);
+      }
     });
   });
 }

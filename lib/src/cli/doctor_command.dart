@@ -57,18 +57,18 @@ class DoctorCommand {
     'bitrise': ('Bitrise', ['BITRISE_TOKEN']),
     'xray': (
       'Xray',
-      ['XRAY_CLIENT_ID', 'XRAY_CLIENT_SECRET', 'XRAY_BASE_PATH']
+      ['XRAY_CLIENT_ID', 'XRAY_CLIENT_SECRET', 'XRAY_BASE_PATH'],
     ),
     // dm.ai #570: raw base-path check — the getter defaults to
     // localhost:8080 and would never report the variable as missing.
     'jenkins': (
       'Jenkins',
-      ['JENKINS_BASE_PATH', 'JENKINS_USER', 'JENKINS_API_TOKEN']
+      ['JENKINS_BASE_PATH', 'JENKINS_USER', 'JENKINS_API_TOKEN'],
     ),
     // SharePoint reuses the Teams (TEAMS_*) OAuth configuration.
     'sharepoint': (
       'SharePoint via Teams OAuth credentials',
-      ['TEAMS_CLIENT_ID', 'TEAMS_TENANT_ID']
+      ['TEAMS_CLIENT_ID', 'TEAMS_TENANT_ID'],
     ),
   };
 
@@ -107,8 +107,9 @@ class DoctorCommand {
     };
     final integrations = <String>{..._alwaysAvailable};
     for (final entry in _configuredMapping.entries) {
-      final ready =
-          entry.value.every((name) => checks[name]?.configured == true);
+      final ready = entry.value.every(
+        (name) => checks[name]?.configured == true,
+      );
       if (ready) integrations.addAll(entry.key);
     }
     return integrations;
@@ -127,6 +128,7 @@ class DoctorCommand {
   /// unresolved provider simply leaves the family unregistered.
   static const Set<String> _alwaysAvailable = {
     'cli',
+    'env',
     'scm',
     'ci',
     'file',
@@ -163,8 +165,10 @@ class DoctorCommand {
   void _writeCheck(StringBuffer buf, _IntegrationCheck check) {
     final state = check.configured ? 'configured' : 'incomplete';
     final mark = check.configured ? '✓' : '✗';
-    buf.writeln('$mark ${check.name} - ${check.displayName} authentication '
-        '$state');
+    buf.writeln(
+      '$mark ${check.name} - ${check.displayName} authentication '
+      '$state',
+    );
     for (final variable in check.missing) {
       buf.writeln('    missing: $variable');
     }
@@ -189,7 +193,7 @@ class DoctorCommand {
   List<String> _jiraMissing() {
     final missing = <String>[];
     _addIfAbsent(missing, 'JIRA_BASE_PATH', _reader.getJiraBasePath());
-    if (_reader.getJiraLoginPassToken() == null) {
+    if (!_present(_reader.getJiraLoginPassToken())) {
       _addIfAbsent(missing, 'JIRA_EMAIL', _reader.getJiraEmail());
       _addIfAbsent(missing, 'JIRA_API_TOKEN', _reader.getJiraApiToken());
     }
@@ -203,7 +207,7 @@ class DoctorCommand {
       'CONFLUENCE_BASE_PATH',
       _reader.getConfluenceBasePath(),
     );
-    if (_reader.getConfluenceLoginPassToken() == null) {
+    if (!_present(_reader.getConfluenceLoginPassToken())) {
       _addIfAbsent(missing, 'CONFLUENCE_EMAIL', _reader.getConfluenceEmail());
       _addIfAbsent(
         missing,

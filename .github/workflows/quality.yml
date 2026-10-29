@@ -18,44 +18,26 @@ concurrency:
 
 jobs:
   pick:
-    # Bitrise-first picker (owner 2026-10-13): the pool is preferred, but a
-    # dead/paused pool must never park the machine on "queued forever".
-    # Canary: dispatch the short-capped pool probe and poll briefly; the
-    # probe answering fast = pool alive -> pool. Any other outcome (no
-    # pickup within the window, red, dispatch failure) -> GitHub-hosted.
-    # Worst-case added latency when the pool is down: ~90s once per run.
-    # ubuntu-slim: separate hosted capacity class — the picker must not
-    # queue behind heavy ubuntu-latest load (fa release validations etc.);
-    # it only runs gh calls (~90s).
+    # Resolves dmtools-agents SHA once per run (gh-437).
     runs-on: ubuntu-slim
     outputs:
-      runner: ${{ steps.pick.outputs.runner }}
+      runner: ubuntu-24.04
+      agents_sha: ${{ steps.agents.outputs.sha }}
     permissions:
       contents: read
-      actions: write
     steps:
-      - name: Canary the Bitrise pool, else fall back to GitHub-hosted
-        id: pick
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Resolve dmtools-agents SHA once per run (gh-437)
+        # Every job of this run fetches agents at THIS commit, so the
+        # agents-gate partition check cannot race with a commit landing
+        # on agents main mid-run. Outputs persist across attempts, so a
+        # rerun of a failed job reuses the same SHA.
+        id: agents
         run: |
-          command -v gh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gh; }
-          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run bitrise-probe.yml --ref "$GITHUB_REF_NAME" || true
-          VERDICT=no-pickup
-          RUNNER=ubuntu-24.04
-          for i in $(seq 1 9); do
-            sleep 10
-            R=$(gh run list --workflow bitrise-probe.yml --created ">$TS" \
-                 --limit 1 --json status,conclusion \
-                 --jq '.[0] | "\(.status)/\(.conclusion // "-")"' 2>/dev/null || echo none)
-            case "$R" in
-              completed/success) VERDICT=pool-up;   RUNNER=bitrise-runner-dmtools-ci; break ;;
-              completed/*)       VERDICT=pool-red;  break ;;
-            esac
-          done
-          echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
-          echo "picker: $VERDICT -> $RUNNER"
+          SHA=$(git ls-remote https://github.com/IstiN/dmtools-agents.git refs/heads/main | cut -f1)
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve dmtools-agents main"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "### dmtools-agents SHA: \`${SHA:0:12}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "[quality] dmtools-agents pinned for this run: $SHA"
 
   static:
     # Fast lane: format + analyze need no toolchain (gcc/QuickJS) — they
@@ -78,6 +60,13 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
       - run: dart pub get
       - run: dart format --set-exit-if-changed .
       - run: dart analyze
@@ -91,6 +80,12 @@ jobs:
     # agents-suite below; falls back to ubuntu-24.04 when the pool is down.
     needs: pick
     runs-on: ${{ needs.pick.outputs.runner }}
+    # gh-440: a synchronously-wedged test isolate never trips dart test's
+    # per-test timeout; bound the whole shard so it dies in minutes.
+    # Scope: the WHOLE job (checkout, apt, QuickJS build, dart test,
+    # coverage) — not just the test step. Normal shards finish in 8-20 min,
+    # so 45 leaves ample headroom.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -111,11 +106,20 @@ jobs:
           find "$WS_PARENT/_temp" -mindepth 1 -mtime +1 -delete 2>/dev/null || true
           df -h / || true
       - uses: actions/checkout@v4
-      - name: Fetch dmtools-agents@main (no submodule pin)
+      - name: Fetch dmtools-agents (run SHA, no submodule pin)
+        env:
+          AGENTS_FETCH_REF: ${{ needs.pick.outputs.agents_sha }}
         run: bash tool/fetch_agents.sh
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
       - run: dart pub get
       - name: Install gcc
         run: |
@@ -133,8 +137,17 @@ jobs:
           done
           echo "apt failed after 3 attempts"
           exit 1
+      - name: Cache QuickJS shared library
+        uses: actions/cache@v4
+        with:
+          path: native/quickjs
+          key: quickjs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pubspec.lock') }}
       - name: Build QuickJS (quickjs_runtime package)
         run: |
+          if [ -s native/quickjs/libquickjs_bridge.so ]; then
+            echo "Using cached native/quickjs/libquickjs_bridge.so"
+            exit 0
+          fi
           PKG=$(python3 -c "import json;print([p['rootUri'] for p in json.load(open('.dart_tool/package_config.json'))['packages'] if p['name']=='quickjs_runtime'][0].replace('file://',''))")
           bash "$PKG/tool/build_quickjs.sh"
       - name: dart test (shard ${{ matrix.shard }}/${{ env.TOTAL_SHARDS }}) --coverage
@@ -146,11 +159,44 @@ jobs:
         # (grep exits 1, bash -e kills the step).
         run: |
           set -o pipefail
-          dart test --coverage=coverage --reporter compact \
+          # gh-445: the watchdog kills a wedged run after STALL_MINUTES of
+          # no progress and writes stall_diagnosis.txt naming the REAL
+          # wedged suite/test (the compact line on screen is just the last
+          # event of any concurrent suite) + per-isolate VM-service state.
+          sudo apt-get install -y -qq gdb >/dev/null 2>&1 || true
+          STALL_MINUTES=8 WATCHDOG_DIR=/tmp/test_watchdog \
+            bash tool/ci_test_watchdog.sh --coverage=coverage --reporter compact \
             --total-shards "$TOTAL_SHARDS" --shard-index "${{ matrix.shard }}" \
             2>&1 | tee /tmp/test_run.log
           COUNT=$(grep -oE '\+[0-9]+' /tmp/test_run.log | tail -1 | tr -d '+' || true)
           echo "test_count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
+      - name: Stall evidence (failed or timed-out shard)
+        # gh-440: runs only when the test step itself FAILED or was
+        # CANCELLED (job timeout). A skipped test step (earlier step red,
+        # e.g. apt/QuickJS) has no /tmp/test_run.log to show — skip.
+        if: always() && (steps.test.outcome == 'failure' || steps.test.outcome == 'cancelled')
+        run: |
+          {
+            echo "### test shard ${{ matrix.shard }} — last 100 reporter lines"
+            echo '```'
+            tail -n 100 /tmp/test_run.log 2>/dev/null || echo '(no log captured)'
+            echo '```'
+            if [ -s /tmp/test_watchdog/stall_diagnosis.txt ]; then
+              echo "### stall diagnosis (gh-445)"
+              echo '```'
+              head -c 60000 /tmp/test_watchdog/stall_diagnosis.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && (steps.test.outcome == 'failure' || steps.test.outcome == 'cancelled')
+        with:
+          name: test-shard-${{ matrix.shard }}-log
+          path: |
+            /tmp/test_run.log
+            /tmp/test_watchdog/
+          if-no-files-found: warn
+          retention-days: 7
       - run: dart pub global activate coverage
       - name: Format coverage (shard)
         # Prune non-report vm.json stubs: a tag-excluded (skipped) test
@@ -220,12 +266,6 @@ jobs:
           df -h / || true
       - uses: actions/checkout@v4
         if: needs.static.result == 'success' && needs.test.result == 'success'
-      - uses: dart-lang/setup-dart@v1
-        if: needs.static.result == 'success' && needs.test.result == 'success'
-        with:
-          sdk: stable
-      - run: dart pub get
-        if: needs.static.result == 'success' && needs.test.result == 'success'
       - uses: actions/download-artifact@v4
         if: needs.static.result == 'success' && needs.test.result == 'success'
         with:
@@ -252,10 +292,13 @@ jobs:
           echo "test_count=$TOTAL" >> "$GITHUB_OUTPUT"
       - name: Install crap4dart
         if: needs.static.result == 'success' && needs.test.result == 'success'
-        # 0.9.5: fixed the test_assertions parser limitation with trailing
-        # named `skip:` args, so the two config excludes are gone. Keep this
-        # pin aligned with the version the pre-commit hook runs locally.
-        run: dart pub global activate crap4dart 0.9.5
+        # Download prebuilt crap4dart-linux-x64 release binary (no Dart SDK needed).
+        run: |
+          CRAP_VER=v0.17.0
+          curl -fsSL "https://github.com/IstiN/crap4dart/releases/download/${CRAP_VER}/crap4dart-linux-x64" -o /tmp/crap4dart
+          chmod +x /tmp/crap4dart
+          sudo mv /tmp/crap4dart /usr/local/bin/crap4dart
+          crap4dart --version
       - run: crap4dart check --all
         if: needs.static.result == 'success' && needs.test.result == 'success'
       - run: crap4dart analyze
@@ -331,6 +374,7 @@ jobs:
     # gate. The workflow comment below already anticipated pool hosting.
     needs: pick
     runs-on: ${{ needs.pick.outputs.runner }}
+    timeout-minutes: 45  # gh-440: bounded wedge, see test job
     strategy:
       fail-fast: false
       matrix:
@@ -351,11 +395,20 @@ jobs:
           find "$WS_PARENT/_temp" -mindepth 1 -mtime +1 -delete 2>/dev/null || true
           df -h / || true
       - uses: actions/checkout@v4
-      - name: Fetch dmtools-agents@main (no submodule pin — L4 suite)
+      - name: Fetch dmtools-agents (run SHA — L4 suite)
+        env:
+          AGENTS_FETCH_REF: ${{ needs.pick.outputs.agents_sha }}
         run: bash tool/fetch_agents.sh
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
       - run: dart pub get
       - name: Install gcc
         run: |
@@ -373,8 +426,17 @@ jobs:
           done
           echo "apt failed after 3 attempts"
           exit 1
+      - name: Cache QuickJS shared library
+        uses: actions/cache@v4
+        with:
+          path: native/quickjs
+          key: quickjs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pubspec.lock') }}
       - name: Build QuickJS (quickjs_runtime package)
         run: |
+          if [ -s native/quickjs/libquickjs_bridge.so ]; then
+            echo "Using cached native/quickjs/libquickjs_bridge.so"
+            exit 0
+          fi
           PKG=$(python3 -c "import json;print([p['rootUri'] for p in json.load(open('.dart_tool/package_config.json'))['packages'] if p['name']=='quickjs_runtime'][0].replace('file://',''))")
           bash "$PKG/tool/build_quickjs.sh"
       # Pinned via the agents/ submodule instead of a floating clone so the
@@ -413,7 +475,7 @@ jobs:
     # + the result guard below make a red/cancelled shard produce a red
     # required check, so the shape stays safe if a `pull_request` trigger
     # is ever added.
-    needs: [agents-suite]
+    needs: [pick, agents-suite]
     if: always()
     runs-on: ubuntu-slim
     steps:
@@ -433,12 +495,23 @@ jobs:
           df -h / || true
       - uses: actions/checkout@v4
         if: needs.agents-suite.result == 'success'
-      - name: Fetch dmtools-agents@main (no submodule pin)
+      - name: Fetch dmtools-agents (run SHA, no submodule pin)
+        if: needs.agents-suite.result == 'success'
+        env:
+          AGENTS_FETCH_REF: ${{ needs.pick.outputs.agents_sha }}
         run: bash tool/fetch_agents.sh
       - uses: dart-lang/setup-dart@v1
         if: needs.agents-suite.result == 'success'
         with:
           sdk: stable
+      - name: Cache pub packages
+        if: needs.agents-suite.result == 'success'
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
       - run: dart pub get
         if: needs.agents-suite.result == 'success'
       - uses: actions/download-artifact@v4

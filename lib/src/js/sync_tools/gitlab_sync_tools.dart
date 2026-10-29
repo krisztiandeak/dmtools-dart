@@ -400,7 +400,12 @@ String _getCommitStatuses(_GitlabConfig config, Map<String, dynamic> args) {
 String _getJobLogs(_GitlabConfig config, Map<String, dynamic> args) {
   final url = '${_projectsPath(config, args)}'
       '/jobs/${syncAsInt(args['jobId'])}/trace';
-  return syncBodyOrError(SyncHttpClient.get(url, headers: config.headers));
+  final body =
+      syncBodyOrError(SyncHttpClient.get(url, headers: config.headers));
+  // The trace endpoint answers plain text; the FFI bridge marshals through
+  // JSON, so encode unconditionally (Java parity: JS gets the raw string;
+  // agents-side callers try-parse and fall back).
+  return jsonEncode(body);
 }
 
 /// `gitlab_list_pipeline_runs` — GET `projects/{id}/pipelines`.

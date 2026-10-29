@@ -26,6 +26,17 @@ const _fieldNames = <String, String>{
   'iterationpath': 'System.IterationPath',
   'storypoints': 'Microsoft.VSTS.Scheduling.StoryPoints',
   'effort': 'Microsoft.VSTS.Scheduling.Effort',
+  // Jira-style names (dm.ai #707 parity).
+  'key': 'System.Id',
+  'status': 'System.State',
+  'labels': 'System.Tags',
+  'parent': 'System.Parent',
+  'updated': 'System.ChangedDate',
+  'created': 'System.CreatedDate',
+  'issuetype': 'System.WorkItemType',
+  'assignee': 'System.AssignedTo',
+  'reporter': 'System.CreatedBy',
+  'project': 'System.TeamProject',
 };
 
 /// Maps a human field name to its ADO reference name; names containing a

@@ -23,6 +23,7 @@ void main() {
   lifecycleEnvTests();
   lifecycleTicketDataTests();
   ticketHydrationTests();
+  ticketCompositeHydrationTests();
   ticketTimerHydrationTests();
   ticketHydrationEdgeTests();
   ticketHydrationPrecedenceTests();
@@ -513,18 +514,30 @@ void lifecycleContextTests() {
 
 void lifecycleEnvTests() {
   group('CliAgent env', () {
-    test('sets envVariables overrides for subprocesses', () async {
+    test('sets envVariables overrides and interpolates \$VAR from dmtools.env',
+        () async {
       final tmp = await _createTempDir();
       final log = '${tmp.path}/env.log';
       try {
+        await File('${tmp.path}/dmtools.env').writeAsString(
+          'ENV_VAR_DEV_QUEUE=[{"provider_type":"copilot"}]\n',
+        );
         await (CliAgent(
           params: CliAgentParams()
-            ..cliCommands = ['echo \$MY_VAR >> "$log"']
-            ..envVariables = {'MY_VAR': 'injected-value'}
+            ..cliCommands = [
+              'printf "%s|%s" "\$MY_VAR" "\$FA_PROVIDERS_QUEUE" > "$log"'
+            ]
+            ..envVariables = {
+              'MY_VAR': 'injected-value',
+              'FA_PROVIDERS_QUEUE': r'$ENV_VAR_DEV_QUEUE',
+            }
             ..cleanupInputFolder = false,
           workingDirectory: tmp.path,
         )).run();
-        expect((await File(log).readAsString()).trim(), 'injected-value');
+        expect(
+          (await File(log).readAsString()).trim(),
+          'injected-value|[{"provider_type":"copilot"}]',
+        );
       } finally {
         await tmp.delete(recursive: true);
       }
@@ -642,6 +655,44 @@ void ticketHydrationTests() {
   });
 }
 
+void ticketCompositeHydrationTests() {
+  group('CliAgent composite ticket hydration', () {
+    test(
+      'hydrates params.ticket and inputFolderPath for composite GitHub contextId',
+      () async {
+        final tmp = await _createTempDir();
+        final log = '${tmp.path}/ticket_key.log';
+        final js = File(
+          '${tmp.path}/post_cb.js',
+        )..writeAsStringSync(
+            'function action(params) { '
+            'file_write({path: "$log", content: params.ticket.key + "|" + params.jobParams.inputFolderPath}); }',
+          );
+        try {
+          Directory('${tmp.path}/input/gh-81').createSync(recursive: true);
+          File('${tmp.path}/input/gh-81/ticket.json').writeAsStringSync(
+            '{"key":"acme/widgets#81","number":81,"title":"Composite"}',
+          );
+          await (CliAgent(
+            params: CliAgentParams()
+              ..cliCommands = ['echo done']
+              ..metadata = {'contextId': 'acme/widgets#81'}
+              ..postJSAction = js.path
+              ..cleanupInputFolder = false,
+            workingDirectory: tmp.path,
+          )).run();
+          expect(
+            (await File(log).readAsString()).trim(),
+            'acme/widgets#81|${tmp.path}/input/gh-81',
+          );
+        } finally {
+          await tmp.delete(recursive: true);
+        }
+      },
+    );
+  });
+}
+
 void ticketTimerHydrationTests() {
   group('CliAgent timer ticket hydration', () {
     test(
@@ -715,17 +766,13 @@ void ticketHydrationPrecedenceTests() {
     test('explicit ticketData wins over the ticket.json convention', () async {
       final tmp = await _createTempDir();
       final log = '${tmp.path}/ticket_key.log';
-      final js = File(
-        '${tmp.path}/post_cb.js',
-      )..writeAsStringSync(
-          'function action(params) { '
-          'file_write({path: "$log", content: params.ticket.key}); }',
-        );
+      final js = File('${tmp.path}/post_cb.js')
+        ..writeAsStringSync('function action(params) { '
+            'file_write({path: "$log", content: params.ticket.key}); }');
       try {
         Directory('${tmp.path}/input/gh-80').createSync(recursive: true);
-        File('${tmp.path}/input/gh-80/ticket.json').writeAsStringSync(
-          '{"key":"gh-80"}',
-        );
+        File('${tmp.path}/input/gh-80/ticket.json')
+            .writeAsStringSync('{"key":"gh-80"}');
         await (CliAgent(
           params: CliAgentParams()
             ..cliCommands = ['echo done']
@@ -743,17 +790,10 @@ void ticketHydrationPrecedenceTests() {
   });
 }
 
-// ======================================================================
-// Helpers
-// ======================================================================
+Future<Directory> _createTempDir() =>
+    Directory.systemTemp.createTemp('cli_agent_test_');
 
-/// Creates a unique temporary directory.
-Future<Directory> _createTempDir() async {
-  return Directory.systemTemp.createTemp('cli_agent_test_');
-}
-
-/// Writes a response file into a subfolder of [baseDir].
-Future<void> _writeResponse(String baseDir, String folder, String content) {
-  final file = File('$baseDir/$folder/$responseFileName');
-  return file.create(recursive: true).then((_) => file.writeAsString(content));
-}
+Future<void> _writeResponse(String baseDir, String folder, String content) =>
+    File('$baseDir/$folder/$responseFileName')
+        .create(recursive: true)
+        .then((f) => f.writeAsString(content));

@@ -30,8 +30,6 @@ bitrise_update_yml
 bitrise_update_yml_config
 bitrise_upsert_secret
 bitrise_validate_yml
-confluence_get_page_inline_comments
-confluence_reply_to_inline_comment
 file_validate_json
 file_validate_json_file
 gitlab_cancel_job

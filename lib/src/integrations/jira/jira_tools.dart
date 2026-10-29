@@ -7,6 +7,7 @@ library;
 import '../../mcp/tool_definition.dart';
 import '../../mcp/tool_param.dart';
 import 'jira_client.dart';
+import 'jira_utils.dart';
 
 part 'jira_agile_tools.dart';
 part 'jira_attachment_tools.dart';
@@ -52,7 +53,7 @@ const _jqlSearchParams = [
     name: 'jql',
     description: 'The JQL query string',
     required: true,
-    aliases: ['searchQueryJQL', 'query'],
+    aliases: ['wiql', 'query', 'searchQueryJQL'],
   ),
   _fieldsListParam,
 ];
@@ -223,10 +224,20 @@ class JiraToolExecutor {
             'jira_assign': _assignTo,
             'jira_create_ticket_basic': _createTicketBasic,
             'jira_create_ticket': _createTicketBasic,
-            'jira_create_ticket_with_json': (a) => _client.createTicketWithJson(
-                  a['project'] as String,
-                  a['fieldsJson'] as Map<String, dynamic>,
-                ),
+            'jira_create_ticket_with_json': (a) {
+              // gh-427 E5: no third labels path — steer callers to fieldsJson.
+              if (a.containsKey('labels')) {
+                throw ArgumentError(
+                  'labels is not a top-level argument of '
+                  'jira_create_ticket_with_json; pass it inside fieldsJson, '
+                  'e.g. {"fieldsJson": {"labels": ["a", "b"]}}',
+                );
+              }
+              return _client.createTicketWithJson(
+                a['project'] as String,
+                a['fieldsJson'] as Map<String, dynamic>,
+              );
+            },
           };
 
   /// `jira_assign_ticket_to` — assign [key] to [accountId].
@@ -242,6 +253,7 @@ class JiraToolExecutor {
         a['issueType'] as String,
         a['summary'] as String,
         a['description'] as String?,
+        jiraCreateLabelsArg(a),
       );
 
   /// Dispatch entries for the project-metadata read tools.
@@ -280,6 +292,7 @@ class JiraToolExecutor {
                   a['summary'] as String,
                   a['parentKey'] as String,
                   a['description'] as String?,
+                  jiraCreateLabelsArg(a),
                 ),
           };
 

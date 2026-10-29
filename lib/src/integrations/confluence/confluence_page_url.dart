@@ -90,3 +90,20 @@ ConfluencePageRef _checkBaseIndex(List<String> segments, int base) {
   }
   return const ConfluenceUnknownUrlRef();
 }
+
+/// Builds the CQL query for `confluence_search_content_by_text` (gh-739):
+/// scopes to [defaultSpace] when configured (non-empty) and [query] does
+/// not already specify a `space =` / `space in` clause.
+String buildConfluenceTextSearchCql(String query, String? defaultSpace) {
+  final space = defaultSpace?.trim() ?? '';
+  final textClause = '(title ~ "$query" OR text ~ "$query")';
+  final scoped = space.isNotEmpty && !_hasSpaceClause(query)
+      ? '$textClause AND space = "$space"'
+      : textClause;
+  return '$scoped ORDER BY lastModified ASC';
+}
+
+/// Whether [query] already carries an explicit `space =` or `space in`
+/// CQL clause (case-insensitive).
+bool _hasSpaceClause(String query) =>
+    RegExp(r'\bspace\s*(?:=|in\b)', caseSensitive: false).hasMatch(query);

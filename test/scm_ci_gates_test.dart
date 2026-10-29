@@ -1,8 +1,8 @@
 /// REG gates for the `scm_*`/`ci_*` alias layer (gh-339).
 ///
-/// - AC2: the committed usage census (`scm_alias_usage_census.txt`) is
-///   current (recomputed from `agents/js` on every run) and every census
-///   tool is covered by a registered alias (census ⊆ alias set).
+/// - AC2: the usage census is recomputed live from `agents/js` on every
+///   run and every census tool is covered by a registered alias
+///   (census ⊆ alias set).
 /// - AC3: the SM loop files contain zero `github_*` call sites after
 ///   migration — the grep gate. Any red here blocks merge even with
 ///   UT/IT green.
@@ -37,18 +37,6 @@ void main() {
 /// AC2 — the census is the tiering witness for the core alias subset.
 void censusTests() {
   group('scm alias usage census (AC2)', () {
-    test('the committed fixture is current (regenerate when js/ changes)', () {
-      final computed = computeCensus();
-      final committed =
-          File('test/fixtures/scm_alias_usage_census.txt').readAsLinesSync();
-      expect(
-        censusSites(committed),
-        censusSites(computed),
-        reason: 'test/fixtures/scm_alias_usage_census.txt is stale — '
-            'regenerate with: dart run tool/scm_alias_census.dart',
-      );
-    });
-
     test('the census is non-empty (the scan actually sees agents/js)', () {
       expect(computeCensus(), isNotEmpty);
     });

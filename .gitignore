@@ -37,11 +37,13 @@ native/quickjs/*.dylib
 !.dmtools/runners/
 .dmtools/runners/**/
 !.dmtools/runners/*.json
+!.dmtools/instructions/
+!.dmtools/instructions/*.md
 !.dmtools/copilot-sessions/
 .dmtools/copilot-sessions/**
 .dmtools-logs/
-input/
-outputs/
+/input/
+/outputs/
 
 # Local machine-loop runs materialize the dmtools-agents factory checkout
 # here — factory-sm.yml clones it into factory-agents/ in CI, and the SM
@@ -57,3 +59,6 @@ outputs/
 .codegraph/
 agents/
 agents/
+
+# Playwright CLI session artifacts (console logs, page snapshots) — local run output.
+.playwright-cli/

@@ -9,7 +9,7 @@
 ///
 /// Tiering (gh-339): v1 ships the census-derived core subset — the tools
 /// the SM loop plus the most-used business calls actually touch (see
-/// `test/fixtures/scm_alias_usage_census.txt`). Second-tier breadth
+/// `tool/scm_alias_census.dart`). Second-tier breadth
 /// (create/reopen PRs, files, review threads, branches creation,
 /// update-branch) follows in later cards; `scm_update_branch` has no
 /// concrete GitHub tool today (the SM shells out to the gh CLI), and

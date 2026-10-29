@@ -109,6 +109,12 @@ class ScmCiSyncTools {
   // ── scm_* → github ────────────────────────────────────────────────────
 
   Map<String, Handler> _scmGithub() => {
+        ..._scmGithubPrs(),
+        ..._scmGithubIssues(),
+      };
+
+  /// `scm_*` PR aliases routed to the GitHub tools.
+  Map<String, Handler> _scmGithubPrs() => {
         'scm_list_prs': (a) => _stateValidated(
             a, (state) => _ghCall('github_list_prs', {'state': state}, a)),
         'scm_get_pr': (a) =>
@@ -133,6 +139,10 @@ class ScmCiSyncTools {
             {'pullRequestId': a['pr'], 'text': a['text']}, a),
         'scm_get_pr_comments': (a) =>
             _ghCall('github_get_pr_comments', {'pullRequestId': a['pr']}, a),
+      };
+
+  /// `scm_*` issue/branch/review aliases routed to the GitHub tools.
+  Map<String, Handler> _scmGithubIssues() => {
         'scm_create_comment': (a) => _ghCall('github_create_comment',
             {'number': a['issue'], 'body': a['body']}, a),
         'scm_get_issue': (a) =>
@@ -432,31 +442,7 @@ class ScmCiSyncTools {
 
   String _glVerdict(Map<String, dynamic> a) {
     final runId = a['runId'];
-    if (runId != null) {
-      final jobsHandler = _gl['gitlab_get_pipeline_jobs'];
-      if (jobsHandler == null) {
-        // The concrete pipeline-jobs tool has no sync surface yet (it is
-        // still in the Java-parity gap list) — an honest gap error beats
-        // a null-check crash on the primary runId form. The pr/sha
-        // probes below are fully served.
-        return _err('ci_get_verdict by runId is not available on the '
-            'GitLab route in v1 — the concrete gitlab_get_pipeline_jobs '
-            'tool has no GitLab sync surface yet; poll via the pr or sha '
-            'probe form instead');
-      }
-      final raw = jobsHandler(_withRepo({'pipelineId': runId}, a));
-      final body = _decode(raw);
-      if (body['error'] != null)
-        return _runMismatch(raw, providerGitlab, runId);
-      final jobs = body['jobs'] as List? ?? const [];
-      final statuses = [
-        for (final j in jobs.whereType<Map>()) {'status': j['status']},
-      ];
-      return jsonEncode({
-        'provider': providerGitlab,
-        'verdict': gitlabStatusListVerdict(statuses),
-      });
-    }
+    if (runId != null) return _glRunVerdict(runId, a);
     if (a['pr'] != null) {
       final raw = _glCall(
           'gitlab_get_mr_pipelines', {'pullRequestId': '${a['pr']}'}, a);
@@ -478,6 +464,32 @@ class ScmCiSyncTools {
     }
     return _err('ci_get_verdict requires runId, pr, or sha (+ optional '
         'workflow) for the head probe');
+  }
+
+  /// `ci_get_verdict` by GitLab pipeline [runId].
+  String _glRunVerdict(dynamic runId, Map<String, dynamic> a) {
+    final jobsHandler = _gl['gitlab_get_pipeline_jobs'];
+    if (jobsHandler == null) {
+      // The concrete pipeline-jobs tool has no sync surface yet (it is
+      // still in the Java-parity gap list) — an honest gap error beats
+      // a null-check crash on the primary runId form. The pr/sha
+      // probes below are fully served.
+      return _err('ci_get_verdict by runId is not available on the '
+          'GitLab route in v1 — the concrete gitlab_get_pipeline_jobs '
+          'tool has no GitLab sync surface yet; poll via the pr or sha '
+          'probe form instead');
+    }
+    final raw = jobsHandler(_withRepo({'pipelineId': runId}, a));
+    final body = _decode(raw);
+    if (body['error'] != null) return _runMismatch(raw, providerGitlab, runId);
+    final jobs = body['jobs'] as List? ?? const [];
+    final statuses = [
+      for (final j in jobs.whereType<Map>()) {'status': j['status']},
+    ];
+    return jsonEncode({
+      'provider': providerGitlab,
+      'verdict': gitlabStatusListVerdict(statuses),
+    });
   }
 
   // ── shared helpers ────────────────────────────────────────────────────

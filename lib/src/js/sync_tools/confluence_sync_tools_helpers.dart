@@ -194,3 +194,69 @@ void _convertStorageToMarkdown(Map<String, dynamic> content) {
   storage['value'] = confluenceStorageToMarkdown(storage['value'] as String);
   storage['representation'] = 'markdown';
 }
+
+/// GETs inline comments for [pageId] via the v2 API
+/// (`{baseUrlV2}/pages/{pageId}/inline-comments?body-format=storage[&limit=…]`).
+SyncHttpResponse _inlineCommentsResponse(
+  _Conf config,
+  String pageId, [
+  int? limit,
+]) {
+  final limitParam = limit != null && limit > 0 ? '&limit=$limit' : '';
+  return SyncHttpClient.get(
+    '${_baseUrlV2(config)}/pages/$pageId/inline-comments'
+    '?body-format=storage$limitParam',
+    headers: config.headers,
+  );
+}
+
+typedef _ResolvedConfluenceLink = ({ConfluencePageRef ref, String url});
+
+/// Resolves [urlString] to its content object (Java `contentByUrl`), or
+/// `null` when the URL is malformed or the fetch fails.
+Map<String, dynamic>? _contentFromUrl(_Conf config, String urlString) {
+  final uri = Uri.tryParse(urlString);
+  if (uri == null) return null;
+  final resolved = _resolveShortLink(config, urlString, uri);
+  if (resolved == null) return null;
+  final (:ref, url: _) = resolved;
+  if (ref is ConfluencePageIdRef) {
+    final decoded =
+        syncTryDecode(syncBodyOrError(_pageByIdResponse(config, ref.id)));
+    return decoded is Map<String, dynamic> ? decoded : null;
+  }
+  if (ref is ConfluenceDisplayRef) {
+    final list = _contentList(
+      _titleAndSpaceResponse(config, ref.title, ref.space),
+    );
+    return list.isEmpty ? null : list.first;
+  }
+  return null;
+}
+
+/// Follows up to five 3xx hops for short links (`/l/…`, `/wiki/x/…`;
+/// curl never follows redirects), returning the final URL ref and the
+/// URL that produced it. Returns `null` when a hop fails or points at
+/// nothing parseable.
+_ResolvedConfluenceLink? _resolveShortLink(
+  _Conf config,
+  String urlString,
+  Uri uri,
+) {
+  var ref = resolveConfluencePageUrl(uri);
+  var current = urlString;
+  for (var hops = 0; hops < 5; hops++) {
+    if (ref is! ConfluenceRedirectRef) break;
+    final resp = SyncHttpClient.get(current, headers: config.headers);
+    final location = resp.headers.entries
+        .where((e) => e.key.toLowerCase() == 'location')
+        .map((e) => e.value)
+        .firstOrNull;
+    if (location == null || !resp.isRedirect) return null;
+    final next = Uri.tryParse(location);
+    if (next == null) return null;
+    current = location;
+    ref = resolveConfluencePageUrl(next);
+  }
+  return (ref: ref, url: current);
+}

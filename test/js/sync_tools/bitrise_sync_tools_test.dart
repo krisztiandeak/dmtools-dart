@@ -35,6 +35,7 @@ void main() {
 Map<String, String> _config(int port) => {
       'BITRISE_TOKEN': 'brise-token',
       'BITRISE_BASE_PATH': 'http://127.0.0.1:$port/v0.1',
+      'JIRA_RETRY_ENABLED': 'false',
     };
 
 void _testRoutingAndConfig() {

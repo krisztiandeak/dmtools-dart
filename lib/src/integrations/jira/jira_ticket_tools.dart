@@ -95,6 +95,7 @@ List<ToolDefinition> _statusTools() => [
             name: 'statusName',
             description: 'The target status name',
             required: true,
+            aliases: ['state', 'status'],
           ),
         ],
       ),
@@ -194,6 +195,7 @@ List<ToolDefinition> _createTools() => [
             description: 'The ticket description',
             required: false,
           ),
+          _labelsParam,
         ],
       ),
       _jiraTool(
@@ -329,6 +331,7 @@ List<ToolDefinition> _createWithParentTools() => [
             description: 'The key of the parent ticket',
             required: true,
           ),
+          _labelsParam,
         ],
       ),
     ];
@@ -459,11 +462,13 @@ List<ToolDefinition> _linkTools() => [
             name: 'sourceKey',
             description: 'The source issue key',
             required: true,
+            aliases: ['sourceId'],
           ),
           ToolParam(
             name: 'anotherKey',
             description: 'The target issue key',
             required: true,
+            aliases: ['targetId'],
           ),
           ToolParam(
             name: 'relationship',
@@ -501,6 +506,7 @@ const _commentTextParam = ToolParam(
   name: 'comment',
   description: 'The comment text to post',
   required: true,
+  aliases: ['text', 'body'],
 );
 
 /// Reusable parameter: the field name to update.
@@ -510,11 +516,23 @@ const _fieldUpdateParam = ToolParam(
   required: true,
 );
 
+/// Reusable parameter: optional label list on the create tools (gh-427).
+///
+/// Deliberate Dart-side divergence: the Java upstream create tools declare
+/// no `labels` param (see `test/fixtures/java_mcp_param_drift.txt`).
+const _labelsParam = ToolParam(
+  name: 'labels',
+  description: 'Optional list of Jira labels to set on the created ticket',
+  type: 'array',
+  required: false,
+);
+
 /// Reusable parameter: issue type for ticket creation.
 const _issueTypeParam = ToolParam(
   name: 'issueType',
   description: 'The type of issue to create (e.g., Bug, Story, Task)',
   required: true,
+  aliases: ['workItemType'],
 );
 
 /// Reusable parameter: the ticket summary/title.
@@ -522,4 +540,5 @@ const _summaryParam = ToolParam(
   name: 'summary',
   description: 'The ticket summary/title',
   required: true,
+  aliases: ['title'],
 );

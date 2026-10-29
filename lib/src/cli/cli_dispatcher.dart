@@ -15,11 +15,13 @@ import 'dart:io';
 import '../agents/agent_factory.dart';
 import '../agents/cli_agent.dart';
 import '../agents/teammate_job.dart';
+import '../agents/input_context_parallel.dart';
 import 'compile_command.dart';
 import '../config/property_reader.dart';
 import '../config/property_reader_getters.dart';
 import '../js/async_job_pool.dart';
 import '../js/job_runner.dart';
+import '../js/sync_http_bridge.dart';
 import '../js/sync_parallel.dart';
 import '../js/sync_tools/confluence_sync_tools.dart';
 import '../js/tool_bridge.dart';
@@ -30,28 +32,15 @@ import '../pack/agent_pack_resolver.dart';
 import '../pack/pack_provenance.dart';
 import '../version.dart';
 import 'doctor_command.dart';
+import 'upgrade_command.dart';
 import 'help_text.dart';
 import 'run_command_processor.dart';
 import 'job_registry.dart';
 
 /// Parses CLI arguments, dispatches commands and reports exit codes.
 class CliDispatcher {
-  /// Creates a dispatcher.
-  ///
-  /// [writer] receives every output line (defaults to `print`) and
-  /// [propertyReader] backs the `doctor` command and the alias-resolution
-  /// default reads (`DEFAULT_TRACKER` / `DEFAULT_SOURCE_CODE` resolve
-  /// through the standard property chain — overrides, config.properties,
-  /// `dmtools.env`, then the process environment — like the tracker-hub
-  /// routing rule; defaults to a CWD-rooted reader). [isTty] decides the
-  /// no-argument behaviour (interactive stub on a terminal, help
-  /// otherwise). [asyncPool] is the engine-worker pool booted lazily for
-  /// `runAsync` jobs (defaults to [AsyncJobPool.instance]) and
-  /// [confluencePool] the Confluence parallel pool booted lazily before
-  /// Confluence sync tools (defaults to `confluenceSyncWorkerPool`) —
-  /// test seams mirroring [JsRunConfig.pool]. [errorWriter] receives
-  /// diagnostics that must stay off the machine-parsed stdout (defaults
-  /// to `stderr.writeln`); a test seam like [writer].
+  /// Creates a dispatcher ([writer], [errorWriter], [propertyReader],
+  /// [isTty], and [pools] default to production wiring).
   CliDispatcher({
     void Function(String line)? writer,
     void Function(String line)? errorWriter,
@@ -91,14 +80,22 @@ class CliDispatcher {
   /// `Process.run` (await-based). All other handlers are synchronous and
   /// complete immediately.
   Future<int> dispatch(List<String> args) async {
-    if (args.isEmpty) {
+    final stripped = _stripLeadingShellFlags(args);
+    if (stripped.isEmpty) {
       return _isTty() ? _interactiveStub() : _printHelp();
     }
-    final handler = _handlers[args.first];
-    if (handler == null)
-      return _toolDispatch(args.first, args.skip(1).toList());
-    return handler(args.skip(1).toList());
+    final handler = _handlers[stripped.first];
+    if (handler == null) {
+      return _toolDispatch(stripped.first, stripped.skip(1).toList());
+    }
+    return handler(stripped.skip(1).toList());
   }
+
+  /// Strips leading global verbosity flags (`--debug`, `--verbose`, `--quiet`)
+  /// before subcommand/tool lookup so `dmtools --debug run ...` dispatches to
+  /// `run`.
+  static List<String> _stripLeadingShellFlags(List<String> args) =>
+      args.skipWhile(_shellFlags.contains).toList();
 
   late final Map<String, FutureOr<int> Function(List<String> rest)> _handlers =
       {
@@ -111,6 +108,12 @@ class CliDispatcher {
     'doctor': (_) => _runDoctor(),
     'run': _runJob,
     'compile': _runCompile,
+    'upgrade': _runUpgrade,
+    'update': _runUpgrade,
+    // gh-395: old launchers forward `upgrade` to the runtime as `mcp upgrade`.
+    'mcp': (rest) => rest.isNotEmpty && _isUpgradeWord(rest.first)
+        ? _runUpgrade(rest.skip(1).toList())
+        : _toolDispatch('mcp', rest),
     'list': _listTools,
     'interactive': (_) => _interactiveStub(),
     'i': (_) => _interactiveStub(),
@@ -141,6 +144,13 @@ class CliDispatcher {
     _writer(_doctor.run());
     return 0;
   }
+
+  static bool _isUpgradeWord(String word) =>
+      word == 'upgrade' || word == 'update';
+
+  /// Upgrades the runtime + launcher via the release installer (gh-395).
+  Future<int> _runUpgrade(List<String> rest) =>
+      UpgradeCommand(writer: _writer).run(rest);
 
   /// Builds a versioned agent pack (zip + manifest + sha256) — dm.ai #595.
   int _runCompile(List<String> rest) =>
@@ -242,6 +252,9 @@ class CliDispatcher {
     // this isolate's event loop — boot the Confluence pool now if the job
     // could reach one (see [bootConfluenceSyncPool]).
     await _prepareConfluencePool();
+    if (SyncHttpBridge.shared.ready) {
+      await InputContextParallelPools.bootAll(_reader, onError: _errorWriter);
+    }
     if (name.toLowerCase() == 'jsrunner') {
       return _executeJsRunner(params);
     }
@@ -706,7 +719,7 @@ class CliDispatcher {
   }
 
   /// Shell-level flags handled elsewhere and never treated as named args.
-  static const _shellFlags = {'--verbose', '--debug'};
+  static const _shellFlags = {'--verbose', '--debug', '--quiet'};
 
   /// Bare `key=value` positional tokens that name an argument.
   static final _namedTokenPattern = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*=.*');

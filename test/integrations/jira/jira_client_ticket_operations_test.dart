@@ -14,11 +14,13 @@ void main() {
   assignToTests();
   updateFieldTests();
   createTicketBasicTests();
+  createTicketBasicLabelsTests();
   getTransitionsTests();
   deleteTicketTests();
   clearFieldTests();
   ticketOperationsExecutorReadDispatchTests();
   ticketOperationsExecutorWriteDispatchTests();
+  ticketOperationsExecutorLabelsTests();
 }
 
 /// `jira_get_comments` — GET `/issue/{key}/comment`.
@@ -107,6 +109,48 @@ void createTicketBasicTests() {
     test('returns an empty map when the body is not an object', () async {
       final f = mockJira((o) => '[]');
       expect(await f.client.createTicketBasic('PROJ', 'Task', 'T'), isEmpty);
+    });
+  });
+}
+
+/// gh-427 AC2/AC3/E1: `labels` mapping on [JiraClient.createTicketBasic].
+void createTicketBasicLabelsTests() {
+  group('JiraClient.createTicketBasic labels', () {
+    test('maps labels into the create payload', () async {
+      final f = mockJira((o) => _createdBody);
+      await f.client.createTicketBasic(
+        'PROJ',
+        'Task',
+        'Title',
+        'Desc',
+        ['development', 'ai_repo_task'],
+      );
+      final decoded = jsonDecode(f.adapter.calls.single.data as String) as Map;
+      expect(decoded['fields']['labels'], ['development', 'ai_repo_task']);
+    });
+
+    test('omits the labels key when the list is empty', () async {
+      // gh-427 E1: an empty list keeps the label-less wire shape.
+      final f = mockJira((o) => _createdBody);
+      await f.client.createTicketBasic('PROJ', 'Task', 'T', 'D', []);
+      final fields =
+          (jsonDecode(f.adapter.calls.single.data as String) as Map)['fields'];
+      expect(fields.containsKey('labels'), isFalse);
+    });
+
+    test('absent labels keeps the payload byte-identical to the old shape',
+        () async {
+      // gh-427 AC3 golden: no labels arg ⇒ exactly the pre-change payload.
+      final f = mockJira((o) => _createdBody);
+      await f.client.createTicketBasic('PROJ', 'Task', 'Title');
+      final body = jsonDecode(f.adapter.calls.single.data as String) as Map;
+      expect(body, {
+        'fields': {
+          'project': {'key': 'PROJ'},
+          'issuetype': {'name': 'Task'},
+          'summary': 'Title',
+        }
+      });
     });
   });
 }
@@ -240,6 +284,61 @@ void ticketOperationsExecutorWriteDispatchTests() {
   });
 }
 
+/// gh-427 AC5/E2/E5: loud labels validation at the executor boundary.
+void ticketOperationsExecutorLabelsTests() {
+  group('JiraToolExecutor.execute labels validation', () {
+    late _SpyJiraClient spy;
+    late JiraToolExecutor executor;
+
+    setUp(() {
+      spy = _SpyJiraClient(mockHttp((o) => '{}').http);
+      executor = JiraToolExecutor(spy);
+    });
+
+    test('a non-string-list labels arg fails loudly with no HTTP', () async {
+      // Wrong labels types never reach the wire (sync-throwing handlers).
+      expect(
+        () => executor.execute('jira_create_ticket', {
+          'project': 'PROJ',
+          'issueType': 'Task',
+          'summary': 'T',
+          'labels': 'development',
+        }),
+        throwsArgumentError,
+      );
+      expect(
+        () => executor.execute('jira_create_ticket', {
+          'project': 'PROJ',
+          'issueType': 'Task',
+          'summary': 'T',
+          'labels': [1, 2],
+        }),
+        throwsArgumentError,
+      );
+      expect(spy.calls, isEmpty);
+    });
+
+    test('a top-level labels arg on with_json steers to fieldsJson', () async {
+      // gh-427 E5: no third labels path — the error fires before the client
+      // call, so no HTTP happens (the throw precedes createTicketWithJson).
+      await expectLater(
+        () => executor.execute('jira_create_ticket_with_json', {
+          'project': 'PROJ',
+          'fieldsJson': {'summary': 'S'},
+          'labels': ['a'],
+        }),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message,
+            'message',
+            contains('fieldsJson'),
+          ),
+        ),
+      );
+    });
+  });
+}
+
 /// Records every dispatched call then delegates to the real client logic.
 class _SpyJiraClient extends JiraClient {
   _SpyJiraClient(super.http);
@@ -276,9 +375,11 @@ class _SpyJiraClient extends JiraClient {
     String issueType,
     String summary, [
     String? description,
+    List<String>? labels,
   ]) {
     calls.add('createTicketBasic:$project:$issueType:$summary:$description');
-    return super.createTicketBasic(project, issueType, summary, description);
+    return super
+        .createTicketBasic(project, issueType, summary, description, labels);
   }
 
   @override

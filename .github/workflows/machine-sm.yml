@@ -126,8 +126,8 @@ jobs:
       # gh-315: the sharded agents suite merges in `agents-gate` (the
       # matrix shards themselves are not required contexts, same as `test`).
       validation-checks: '["agents-gate","static","gate"]'
-      # Factory-state snapshot → public prerelease asset (board: site/factory)
-      state-publish: '{"channel":"release","tag":"factory-state","asset":"dart-state.json"}'
+      # Factory-state snapshot → factory-data branch (board: dmtools-factory)
+      state-publish: '{"channel":"release","tag":"factory-data","asset":"dart-state.json"}'
       # Parallel READ fan-out inside the tick (dmtools-agents#559): wires the
       # Dart runtime's runAsync worker pool into the SM engine — per-PR/issue
       # enrichment + dispatched-CI probes fan out over 4 workers; '0' would

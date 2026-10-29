@@ -33,6 +33,32 @@ List<int> wiqlStubIds(List stubs) => [
         if (stub is Map && stub['id'] is int) stub['id'] as int,
     ];
 
+/// Extracts work-item ids from any WIQL response (Java `extractWorkItemIds`).
+///
+/// Flat queries answer with `workItems` stubs, returned in order. Link
+/// queries (`FROM WorkItemLinks`) answer with `workItemRelations`: each
+/// relation's **target** is a result, while the anchoring source row (no
+/// `rel`) is skipped. Duplicates are dropped, keeping first occurrence.
+List<int> extractWorkItemIds(Map decoded) {
+  final ids = <int>[];
+  final seen = <int>{};
+  void add(int id) {
+    if (seen.add(id)) ids.add(id);
+  }
+
+  final flat = decoded['workItems'];
+  if (flat is List) wiqlStubIds(flat).forEach(add);
+  final relations = decoded['workItemRelations'];
+  if (relations is List) {
+    for (final relation in relations) {
+      if (relation is! Map || relation['rel'] == null) continue;
+      final target = relation['target'];
+      if (target is Map && target['id'] is int) add(target['id'] as int);
+    }
+  }
+  return ids;
+}
+
 /// Splits [ids] into batches of [size] — ADO caps `wit/workitems` at 200
 /// ids per request (Java `searchAndPerform` batches the same way).
 Iterable<List<int>> batchIds(List<int> ids, {int size = 200}) sync* {

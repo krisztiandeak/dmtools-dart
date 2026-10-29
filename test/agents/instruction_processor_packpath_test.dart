@@ -21,7 +21,8 @@ void main() {
         'Senior Developer Engineer\n${dir.path}/.dmtools/packs/story_development-0.1.18/instructions/common/agent_task_preamble.md';
     final out = p.process(prompt);
     expect(out, contains('PREAMBLE CONTENT'));
-    expect(out, contains('<file path="'));
+    expect(out, contains('## agent_task_preamble.md'));
+    expect(out, isNot(contains('<file path=')));
   });
 
   test('github/readme URLs are not treated as file paths', () {

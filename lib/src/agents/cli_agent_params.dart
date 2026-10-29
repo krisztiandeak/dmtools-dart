@@ -8,6 +8,8 @@
 /// the parameter table in GOAL.md → Phase 5.
 library;
 
+import 'input_context_config.dart';
+
 /// Parameters for the [CliAgent] job.
 ///
 /// Ported from Java `CliAgentParams` which extends `TrackerParams`.
@@ -93,6 +95,14 @@ class CliAgentParams {
   /// Whether to skip the `postJSAction` hook. Default: `false`.
   bool skipPostJSAction = false;
 
+  /// Whether to download ticket attachments into the input folder. Default: `true`.
+  bool includeAttachments = true;
+
+  /// Whether to skip all ticket attachments. Default: `false`.
+  bool skipAllAttachments = false;
+
+  /// Whether to skip video attachments when [includeAttachments] is true. Default: `false`.
+  bool skipVideoAttachments = false;
   // --- Inherited from TrackerParams ---
 
   /// Output type — `comment`, `field`, `creation`, or `none`.
@@ -116,7 +126,21 @@ class CliAgentParams {
   /// Custom parameters exposed to JS actions as `customParams`.
   Map<String, dynamic>? customParams;
 
-  /// Returns the context ID from metadata, or `"cli-agent"` fallback.
+  /// Parsed smart input context configuration (`InputContextConfig`).
+  InputContextConfig? inputContextConfig;
+
+  /// Returns the effective [InputContextConfig] for `TicketInputContextBuilder`.
+  InputContextConfig get effectiveInputContextConfig =>
+      inputContextConfig ??
+      InputContextConfig.fromJson({
+        if (input != null) 'input': input,
+        'includeAttachments': includeAttachments,
+        'skipAllAttachments': skipAllAttachments,
+        'skipVideoAttachments': skipVideoAttachments,
+      });
+
+  /// Returns the context ID from metadata, `input.ticket` / `input` string, or
+  /// `"cli-agent"` fallback.
   ///
   /// Mirrors `CliAgent.getContextId()`.
   String get contextId {
@@ -125,14 +149,27 @@ class CliAgentParams {
       final id = md['contextId'] as String;
       if (id.isNotEmpty) return id;
     }
+    final ticketFromInput = effectiveInputContextConfig.ticket;
+    if (ticketFromInput != null && ticketFromInput.isNotEmpty) {
+      return ticketFromInput;
+    }
     return 'cli-agent';
   }
 
   /// Returns `cliPrompts` as a flat string array, or `null`.
   ///
   /// Handles both plain string arrays and structured config (objects with
-  /// `id`/`prompts` fields), matching the Java `CliPromptsConfig.toStringArray()`.
-  List<String>? get cliPromptsAsArray => _flattenCliPrompts(cliPrompts);
+  /// `id`/`prompt`/`prompts`/`condition` fields), matching the Java
+  /// `CliPromptsConfig.toStringArray()`.
+  List<String>? get cliPromptsAsArray => flattenCliPrompts(cliPrompts);
+
+  /// Flattens `cliPrompts` using an optional [conditionEvaluator] for
+  /// sections that declare a `condition` script path.
+  List<String>? flattenCliPrompts(
+    dynamic value, {
+    bool Function(String condition)? conditionEvaluator,
+  }) =>
+      _flattenCliPrompts(value, conditionEvaluator: conditionEvaluator);
 
   /// Creates params from a JSON map (the `params` block of a job config).
   factory CliAgentParams.fromJson(Map<String, dynamic> json) {
@@ -162,13 +199,20 @@ class CliAgentParams {
       ..skipPreJSAction = _parseBool(json['skipPreJSAction'], false)
       ..skipPreCliJSAction = _parseBool(json['skipPreCliJSAction'], false)
       ..skipPostJSAction = _parseBool(json['skipPostJSAction'], false)
+      ..includeAttachments =
+          _parseAttachmentFlag(json, 'includeAttachments', true)
+      ..skipAllAttachments =
+          _parseAttachmentFlag(json, 'skipAllAttachments', false)
+      ..skipVideoAttachments =
+          _parseAttachmentFlag(json, 'skipVideoAttachments', false)
       ..outputType = _parseString(json['outputType'])
       ..envVariables = _parseStringMap(json['envVariables'])
       ..metadata = _parseDynamicMap(json['metadata'])
       ..initiator = _parseString(json['initiator'])
       ..preJSAction = _parseString(json['preJSAction'])
       ..postJSAction = _parseString(json['postJSAction'])
-      ..customParams = _parseDynamicMap(json['customParams']);
+      ..customParams = _parseDynamicMap(json['customParams'])
+      ..inputContextConfig = InputContextConfig.fromJson(json);
   }
 }
 
@@ -181,6 +225,21 @@ String? _parseString(dynamic value) => value == null ? null : value.toString();
 bool _parseBool(dynamic value, bool defaultValue) {
   if (value is bool) return value;
   if (value is String) return value.toLowerCase() == 'true';
+  return defaultValue;
+}
+
+bool _parseAttachmentFlag(
+  Map<String, dynamic> json,
+  String key,
+  bool defaultValue,
+) {
+  if (json.containsKey(key) && json[key] != null) {
+    return _parseBool(json[key], defaultValue);
+  }
+  final input = json['input'];
+  if (input is Map && input.containsKey(key) && input[key] != null) {
+    return _parseBool(input[key], defaultValue);
+  }
   return defaultValue;
 }
 
@@ -225,23 +284,81 @@ Map<String, List<String>>? _parsePromptsByTracker(dynamic value) {
 
 /// Flattens `cliPrompts` (string array or structured config) to a flat list.
 ///
-/// Each element can be a plain string or an object with `id` and `prompts`
-/// keys (the `CliPromptsConfig` structured form). Returns `null` when the
-/// input is null or empty.
-List<String>? _flattenCliPrompts(dynamic value) {
+/// Each element can be a plain string or an object with `id`, `prompt`/`prompts`,
+/// and optional `condition` keys (the `CliPromptsConfig` structured form).
+/// Returns `null` when the input is null or empty.
+List<String>? _flattenCliPrompts(
+  dynamic value, {
+  bool Function(String condition)? conditionEvaluator,
+}) {
   if (value == null || value is! List) return null;
   final result = <String>[];
   for (final item in value) {
-    result.addAll(_flattenCliPromptItem(item));
+    result.addAll(
+      _flattenCliPromptItem(item, conditionEvaluator: conditionEvaluator),
+    );
   }
   return result.isEmpty ? null : result;
 }
 
 /// Flattens a single `cliPrompts` element (string or section object).
-List<String> _flattenCliPromptItem(dynamic item) {
+List<String> _flattenCliPromptItem(
+  dynamic item, {
+  bool Function(String condition)? conditionEvaluator,
+}) {
   if (item is String) return [item];
   if (item is! Map) return const [];
+  if (!_shouldIncludePromptSection(item, conditionEvaluator)) {
+    return const [];
+  }
+  return _extractSectionStrings(item);
+}
+
+bool _shouldIncludePromptSection(
+  Map<dynamic, dynamic> item,
+  bool Function(String condition)? conditionEvaluator,
+) {
+  final condition = item['condition'];
+  if (condition is! String || conditionEvaluator == null) return true;
+  final trimmed = condition.trim();
+  return trimmed.isEmpty || conditionEvaluator(trimmed);
+}
+
+List<String> _extractSectionStrings(Map<dynamic, dynamic> item) {
+  final result = <String>[];
+  final singlePrompt = item['prompt'];
+  if (singlePrompt is String && singlePrompt.isNotEmpty) {
+    result.add(singlePrompt);
+  }
   final prompts = item['prompts'];
-  if (prompts is! List) return const [];
-  return prompts.whereType<String>().toList();
+  if (prompts is List) {
+    result.addAll(prompts.whereType<String>());
+  }
+  return result;
+}
+
+/// Parses a JS condition return value (JSON string or decoded object) into a boolean.
+bool isCliPromptConditionMet(dynamic rawResult) {
+  if (rawResult == null) return false;
+  if (rawResult is bool) return rawResult;
+  if (rawResult is Map) return _isConditionMetFromMap(rawResult);
+  return _isConditionMetFromString(rawResult.toString().trim());
+}
+
+bool _isConditionMetFromMap(Map<dynamic, dynamic> map) {
+  if (map['uncaughtException'] == true) return false;
+  return isCliPromptConditionMet(map['result']);
+}
+
+bool _isConditionMetFromString(String str) {
+  final lower = str.toLowerCase();
+  if (lower == 'true' || str == '"true"') return true;
+  if (!str.startsWith('{')) return false;
+  final hasTrueResult =
+      RegExp(r'"result"\s*:\s*(true|"true")', caseSensitive: false)
+          .hasMatch(str);
+  final hasException =
+      RegExp(r'"uncaughtException"\s*:\s*true', caseSensitive: false)
+          .hasMatch(str);
+  return hasTrueResult && !hasException;
 }

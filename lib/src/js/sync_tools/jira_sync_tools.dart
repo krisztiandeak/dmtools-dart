@@ -411,7 +411,18 @@ class JiraSyncTools {
   ///
   /// Description is included only when provided (Java `createTicketBasic`).
   String _createTicketBasic(Map<String, dynamic> args) =>
-      _postIssueCreate(_basicCreateFields(args));
+      _validatedCreate(() => _postIssueCreate(_basicCreateFields(args)));
+
+  /// Runs a create executor, mapping argument-validation failures (gh-427
+  /// `labels` type checks) to the `{"error": …}` envelope with zero HTTP
+  /// side effects — validation runs at payload build, before `_run`.
+  String _validatedCreate(String Function() build) {
+    try {
+      return build();
+    } on ArgumentError catch (e) {
+      return _err(e.message.toString());
+    }
+  }
 
   /// `jira_assign_ticket_to` (aliases `jira_assign_to` / `jira_assign` /
   /// `tracker_assign_ticket`) — PUT `issue/{key}/assignee`.
@@ -440,18 +451,24 @@ class JiraSyncTools {
   /// `createTicketInProjectWithParent`: the parent ticket is fetched first
   /// (`?fields=summary`, failing upfront when it cannot be read) and the
   /// full parent object is embedded in the create payload.
-  String _createTicketWithParent(Map<String, dynamic> args) => _run((config) {
-        final parentKey = _asStr(args['parentKey']);
-        final parent = _getJson(
-          config,
-          '${config.baseUrl}/issue/$parentKey?fields=summary',
-        );
-        if (parent == null) {
-          return _err('Failed to fetch parent ticket $parentKey');
-        }
-        return _postIssueCreate({
-          ..._basicCreateFields(args),
-          'parent': parent,
+  String _createTicketWithParent(Map<String, dynamic> args) =>
+      _validatedCreate(() {
+        // Build the base payload first: a bad `labels` arg must fail before
+        // the parent fetch (gh-427: validation errors make no HTTP calls).
+        final base = _basicCreateFields(args);
+        return _run((config) {
+          final parentKey = _asStr(args['parentKey']);
+          final parent = _getJson(
+            config,
+            '${config.baseUrl}/issue/$parentKey?fields=summary',
+          );
+          if (parent == null) {
+            return _err('Failed to fetch parent ticket $parentKey');
+          }
+          return _postIssueCreate({
+            ...base,
+            'parent': parent,
+          });
         });
       });
 
@@ -459,9 +476,20 @@ class JiraSyncTools {
   ///
   /// The `fieldsJson` object is merged over the mandatory `project` field
   /// (Java `createTicketInProjectWithJson`).
-  String _createTicketWithJson(Map<String, dynamic> args) => _postIssueCreate({
-        'project': {'key': _asStr(args['project'])},
-        ..._fieldsJsonArg(args['fieldsJson']),
+  String _createTicketWithJson(Map<String, dynamic> args) =>
+      _validatedCreate(() {
+        // gh-427 E5: no third labels path — steer callers to fieldsJson.
+        if (args.containsKey('labels')) {
+          throw ArgumentError(
+            'labels is not a top-level argument of '
+            'jira_create_ticket_with_json; pass it inside fieldsJson, '
+            'e.g. {"fieldsJson": {"labels": ["a", "b"]}}',
+          );
+        }
+        return _postIssueCreate({
+          'project': {'key': _asStr(args['project'])},
+          ..._fieldsJsonArg(args['fieldsJson']),
+        });
       });
 
   /// `jira_link_issues` (alias `tracker_link_tickets`) — POST `issueLink`.
@@ -712,7 +740,9 @@ class JiraSyncTools {
           ));
 
   /// The shared create fields (project/issuetype/summary, plus description
-  /// when given) — the Java `createTicketBasic` payload base.
+  /// when given, plus the gh-427 `labels` extension when given) — the Java
+  /// `createTicketBasic` payload base. Throws [ArgumentError] on a malformed
+  /// `labels` arg before any HTTP happens.
   Map<String, dynamic> _basicCreateFields(Map<String, dynamic> args) {
     final fields = <String, dynamic>{
       'project': {'key': _asStr(args['project'])},
@@ -721,6 +751,8 @@ class JiraSyncTools {
     };
     final description = _asStr(args['description']);
     if (description.isNotEmpty) fields['description'] = description;
+    final labels = jiraCreateLabelsArg(args);
+    if (labels != null && labels.isNotEmpty) fields['labels'] = labels;
     return fields;
   }
 }

@@ -23,6 +23,7 @@ void main() {
   if (hasPython3()) {
     _testLiveHttp();
     _testSyncHttpBridge();
+    _testSyncHttpBridgeRedirects();
   }
 }
 
@@ -79,6 +80,63 @@ void _testSyncHttpBridge() {
           SyncHttpBridge.shared.request('GET', 'http://127.0.0.1:1/nope');
       expect(resp.statusCode, 0);
       expect(resp.isOk, isFalse);
+    });
+  });
+}
+
+/// Cross-origin vs same-origin redirect header handling in [SyncHttpBridge]
+/// (gh-461: Jira Cloud 303 redirects to `api.media.atlassian.com` must strip
+/// `Authorization` and `X-Atlassian-Token`).
+void _testSyncHttpBridgeRedirects() {
+  group('SyncHttpBridge redirect header stripping (gh-461)', () {
+    late EchoServer jiraServer;
+    late EchoServer mediaServer;
+
+    setUpAll(() async {
+      jiraServer = EchoServer();
+      mediaServer = EchoServer();
+      await jiraServer.start();
+      await mediaServer.start();
+      await SyncHttpBridge.shared.boot();
+    });
+
+    tearDownAll(() {
+      jiraServer.stop();
+      mediaServer.stop();
+      SyncHttpBridge.shared.dispose();
+    });
+
+    test('strips Authorization and X-Atlassian-Token on cross-origin 303', () {
+      final target = Uri.encodeQueryComponent(
+        'http://127.0.0.1:${mediaServer.port}/media/file/1/binary',
+      );
+      final resp = SyncHttpBridge.shared.request(
+        'GET',
+        'http://127.0.0.1:${jiraServer.port}/rest/api/2/attachment/content/1'
+            '?to=$target',
+        headers: {
+          'Authorization': 'Basic dXNlcjp0b2s=',
+          'X-Atlassian-Token': 'nocheck',
+        },
+        followRedirects: true,
+      );
+      expect(resp.statusCode, 200);
+      expect(resp.body, 'CDN-binary-bytes');
+    });
+
+    test('keeps Authorization on same-origin redirect', () {
+      final target = Uri.encodeQueryComponent(
+        'http://127.0.0.1:${jiraServer.port}/same-origin-redir-target',
+      );
+      final resp = SyncHttpBridge.shared.request(
+        'GET',
+        'http://127.0.0.1:${jiraServer.port}/rest/api/2/attachment/content/1'
+            '?to=$target',
+        headers: {'Authorization': 'Basic dXNlcjp0b2s='},
+        followRedirects: true,
+      );
+      expect(resp.statusCode, 200);
+      expect(resp.body, 'same-origin-bytes');
     });
   });
 }

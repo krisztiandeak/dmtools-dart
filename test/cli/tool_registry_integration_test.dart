@@ -29,6 +29,7 @@ void _testCatalogMembership() {
         'ai',
         'file',
         'cli',
+        'env',
         'ado',
         'testrail',
         'bitrise',

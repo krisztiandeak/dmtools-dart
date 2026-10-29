@@ -87,6 +87,7 @@ class XrayHttpClient extends BaseHttpClient {
 /// [createTestExecution] without a manual [authenticate] call.
 class XrayClient {
   final XrayHttpClient _http;
+  final Duration _syncDelay;
   JiraClient? _jira;
 
   /// Creates a client backed by [_http].
@@ -95,7 +96,12 @@ class XrayClient {
   /// create or search Jira issues (tests); production code omits it and a
   /// [JiraClient] is built lazily from the Jira configuration on first use,
   /// mirroring the Java dual Jira/Xray configuration.
-  XrayClient(this._http, {JiraClient? jira}) : _jira = jira;
+  XrayClient(
+    this._http, {
+    JiraClient? jira,
+    Duration syncDelay = const Duration(seconds: 2),
+  })  : _jira = jira,
+        _syncDelay = syncDelay;
 
   /// The lazily-created Jira client backing Jira-side tool calls.
   JiraClient get _jiraClient =>
@@ -629,7 +635,7 @@ class XrayClient {
         // not yet indexed — retry after the delay
       }
       if (attempt < 2) {
-        await Future<void>.delayed(const Duration(seconds: 2));
+        await Future<void>.delayed(_syncDelay);
       }
     }
     return null;

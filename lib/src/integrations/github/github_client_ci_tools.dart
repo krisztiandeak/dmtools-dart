@@ -153,6 +153,13 @@ extension GithubCiPrTools on GithubClient {
     return activities;
   }
 
+  /// Java state synonyms: `opened`→`open`, `declined`→`closed`.
+  static String _normalizePrState(String lowered) => switch (lowered) {
+        'opened' => 'open',
+        'declined' => 'closed',
+        _ => lowered,
+      };
+
   /// `github_list_prs_filtered` — all PRs whose title matches [titleRegex].
   ///
   /// Java `listPullRequestsFiltered`/`pullRequests(checkAllRequests=true)`:
@@ -165,12 +172,7 @@ extension GithubCiPrTools on GithubClient {
     String state,
     String titleRegex,
   ) async {
-    final lowered = state.toLowerCase();
-    final normalized = switch (lowered) {
-      'opened' => 'open',
-      'declined' => 'closed',
-      _ => lowered,
-    };
+    final normalized = _normalizePrState(state.toLowerCase());
     final isMerged = normalized == 'merged';
     final pattern = RegExp(titleRegex);
     final out = <Map<String, dynamic>>[];

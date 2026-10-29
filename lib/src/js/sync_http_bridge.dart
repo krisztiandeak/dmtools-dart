@@ -55,6 +55,7 @@ final class SyncHttpBridge {
 
   final Mailbox _responses = Mailbox();
   SendPort? _workerPort;
+  Isolate? _isolate;
 
   /// Whether the worker isolate is running and [request] is usable.
   bool get ready => _workerPort != null;
@@ -68,7 +69,7 @@ final class SyncHttpBridge {
 
   Future<void> _boot() async {
     final handshake = ReceivePort();
-    await Isolate.spawn(
+    _isolate = await Isolate.spawn(
       _httpWorkerEntry,
       _WorkerInit(
         handshakeSendPort: handshake.sendPort,
@@ -117,6 +118,8 @@ final class SyncHttpBridge {
   /// Stops the worker isolate (test teardown; the CLI hard-exits instead).
   void dispose() {
     _workerPort?.send('shutdown');
+    _isolate?.kill(priority: Isolate.beforeNextEvent);
+    _isolate = null;
     _workerPort = null;
     _booting = null;
   }
@@ -148,7 +151,11 @@ Future<void> _httpWorkerEntry(_WorkerInit init) async {
     ..autoUncompress = false // curl parity: no implicit gzip decoding
     ..findProxy = HttpClient.findProxyFromEnvironment; // http_proxy parity
   await for (final message in inbox) {
-    if (message == 'shutdown') return;
+    if (message == 'shutdown') {
+      inbox.close();
+      client.close(force: true);
+      return;
+    }
     await _serveOne(client, responses, message as Uint8List);
   }
 }
@@ -162,29 +169,7 @@ Future<void> _serveOne(
   final req = jsonDecode(utf8.decode(message)) as Map<String, dynamic>;
   const budget = Duration(seconds: SyncHttpClient.maxTimeSeconds);
   try {
-    final request = await client
-        .openUrl(req['method'] as String, Uri.parse(req['url'] as String))
-        .timeout(budget);
-    // curl parity: plain `-s` never follows; opt-in `-L` parity for the
-    // agent-pack downloads (GitHub Releases 302s to a signed CDN URL).
-    // dart's HttpClientRequest caps the chain at maxRedirects (5) by default.
-    request.followRedirects = req['followRedirects'] as bool? ?? false;
-    // curl parity: no advertised gzip (autoUncompress is already off) and
-    // caller-supplied header names keep their original case (dart would
-    // otherwise lowercase them, which breaks case-sensitive peers).
-    request.headers.remove(HttpHeaders.acceptEncodingHeader, 'gzip');
-    (req['headers'] as Map<String, dynamic>?)?.forEach(
-        (k, v) => request.headers.set(k, '$v', preserveHeaderCase: true));
-    final body = req['body'] as String?;
-    if (body != null) {
-      // Fixed-length body (Content-Length, never chunked) — matches curl's
-      // `--data-binary` wire format and strict servers that ignore chunked
-      // request bodies.
-      final bytes = utf8.encode(body);
-      request.contentLength = bytes.length;
-      request.add(bytes);
-    }
-    final response = await request.close().timeout(budget);
+    final response = await _executeWithRedirects(client, req, budget);
     final headers = <String, String>{};
     response.headers.forEach((name, values) {
       headers[name] = values.join(', ');
@@ -209,4 +194,91 @@ Future<void> _serveOne(
     responses.put(Uint8List.fromList(utf8.encode(
         jsonEncode({'status': 0, 'body': base64Encode(utf8.encode('$e'))}))));
   }
+}
+
+/// Executes [req], following up to 5 HTTP 3xx redirects when `followRedirects`
+/// is true and stripping `Authorization` / `X-Atlassian-Token` headers when a
+/// redirect crosses origins (matching `curl -L` and Java `OkHttpClient`, so
+/// Jira Cloud 303 redirects to `api.media.atlassian.com` succeed — gh-461).
+Future<HttpClientResponse> _executeWithRedirects(
+  HttpClient client,
+  Map<String, dynamic> req,
+  Duration budget,
+) async {
+  var method = req['method'] as String;
+  var uri = Uri.parse(req['url'] as String);
+  var headers = Map<String, dynamic>.from(
+    req['headers'] as Map<String, dynamic>? ?? const {},
+  );
+  var body = req['body'] as String?;
+  final follow = req['followRedirects'] as bool? ?? false;
+  for (var hop = 0;; hop++) {
+    final response = await _sendSingleHop(
+      client,
+      method: method,
+      uri: uri,
+      headers: headers,
+      body: body,
+      budget: budget,
+    );
+    final location = response.headers.value(HttpHeaders.locationHeader);
+    if (!_shouldFollowRedirect(follow, response, location, hop)) {
+      return response;
+    }
+    await response.drain<void>().timeout(budget);
+    final nextUri = uri.resolve(location!);
+    if (!_isSameOrigin(uri, nextUri)) {
+      headers.removeWhere((k, _) => _isOriginScopedAuthHeader(k));
+    }
+    if (_rewritesRedirectToGet(response.statusCode, method)) {
+      method = 'GET';
+      body = null;
+    }
+    uri = nextUri;
+  }
+}
+
+bool _shouldFollowRedirect(
+  bool follow,
+  HttpClientResponse response,
+  String? location,
+  int hop,
+) =>
+    follow && response.isRedirect && location != null && hop < 5;
+
+bool _rewritesRedirectToGet(int statusCode, String method) =>
+    statusCode == HttpStatus.seeOther ||
+    (statusCode <= HttpStatus.found && method != 'GET' && method != 'HEAD');
+
+Future<HttpClientResponse> _sendSingleHop(
+  HttpClient client, {
+  required String method,
+  required Uri uri,
+  required Map<String, dynamic> headers,
+  required String? body,
+  required Duration budget,
+}) async {
+  final request = await client.openUrl(method, uri).timeout(budget);
+  request.followRedirects = false;
+  request.headers.remove(HttpHeaders.acceptEncodingHeader, 'gzip');
+  headers.forEach(
+    (k, v) => request.headers.set(k, '$v', preserveHeaderCase: true),
+  );
+  if (body != null) {
+    final bytes = utf8.encode(body);
+    request.contentLength = bytes.length;
+    request.add(bytes);
+  }
+  return request.close().timeout(budget);
+}
+
+bool _isSameOrigin(Uri a, Uri b) =>
+    a.scheme.toLowerCase() == b.scheme.toLowerCase() &&
+    a.host.toLowerCase() == b.host.toLowerCase() &&
+    a.port == b.port;
+
+bool _isOriginScopedAuthHeader(String name) {
+  final lower = name.toLowerCase();
+  return lower == HttpHeaders.authorizationHeader ||
+      lower == 'x-atlassian-token';
 }

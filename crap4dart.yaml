@@ -191,3 +191,21 @@ gates:
     # 1 = the package barrel (lib/dmtools.dart), standard Dart layout.
     max_loose_files: 1
     exclude: []
+  # File-level near-duplicate detection across markdown docs and Dart
+  # sources (gh-447).
+  similarity:
+    enabled: true
+    dirs: ['.']
+    include:
+      - '**/*.md'
+      - '**/*.dart'
+    jaccard: 0.5
+    containment: 0.85
+    exclude:
+      - '.git/**'
+      - '.dart_tool/**'
+      - 'build/**'
+      - 'coverage/**'
+      - 'node_modules/**'
+      - 'agents/**'
+

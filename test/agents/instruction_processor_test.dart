@@ -29,9 +29,8 @@ void filePathEmbeddingTests() {
         File('${tmp.path}/notes.md').writeAsStringSync('# My Notes\nHello');
         final processor = InstructionProcessor(workingDirectory: tmp.path);
         final result = processor.process('Review ./notes.md please');
-        expect(result, contains('<file path="./notes.md">'));
-        expect(result, contains('# My Notes\nHello'));
-        expect(result, contains('</file>'));
+        expect(result, contains('## notes.md\n# My Notes\nHello'));
+        expect(result, isNot(contains('<file path=')));
       } finally {
         tmp.deleteSync(recursive: true);
       }
@@ -95,7 +94,7 @@ void filePathEdgeCaseTests() {
         File('${tmp.path}/ref.md').writeAsStringSync('body');
         final processor = InstructionProcessor(workingDirectory: tmp.path);
         final result = processor.process('./ref.md then ./ref.md');
-        expect(result, contains('body\n</file> then <file'));
+        expect(result, contains('## ref.md\nbody then ## ref.md'));
       } finally {
         tmp.deleteSync(recursive: true);
       }

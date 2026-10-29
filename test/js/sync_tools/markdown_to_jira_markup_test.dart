@@ -227,6 +227,12 @@ void topLevelInlineRunTests() {
       expect(markdownToJiraMarkup(html), '_First_ _Second_');
     });
 
+    test('top-level <a> keeps the sibling that follows it', () {
+      const html = '<a href="u">L</a> tail <b>z</b>';
+      expect(markdownToJiraMarkup(html), contains('tail'));
+      expect(markdownToJiraMarkup(html), contains('*z*'));
+    });
+
     test('top-level <strong>+<ul> becomes a heading + bullets block', () {
       const html = '<strong>Given</strong><ul><li>a page</li></ul>';
       expect(markdownToJiraMarkup(html), '# *Given*\n* a page');
@@ -344,10 +350,7 @@ void _strikeTests() {
       );
     });
     test('strike wrapping a URL converts both markers', () {
-      expect(
-        markdownToJiraMarkup('~~https://x.io~~'),
-        '-https://x.io-',
-      );
+      expect(markdownToJiraMarkup('~~https://x.io~~'), '-https://x.io-');
     });
     test('hyphenated words and ranges are untouched', () {
       expect(markdownToJiraMarkup('a-b-c and 1-2'), 'a-b-c and 1-2');

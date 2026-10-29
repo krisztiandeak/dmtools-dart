@@ -23,6 +23,8 @@ import 'cli_agent.dart';
 import 'github_ticket_source.dart';
 import 'github_tracker_client.dart';
 import 'cli_agent_params.dart';
+import 'input_context_config.dart';
+import 'ticket_smart_sources.dart';
 
 /// Fetches the hydrated tickets for [inputJql]: each ticket is a raw tracker
 /// JSON map with at least `key` and `fields` (comments included).
@@ -78,8 +80,18 @@ class TeammateJob {
   /// Runs the job and returns `{'success': …, 'results': […]}` where each
   /// result item carries `ticket`, plus the [CliAgent] result fields.
   Future<Map<String, dynamic>> run() async {
-    final inputJql = (params['inputJql'] as String?)?.trim() ?? '';
+    final inputConfig = InputContextConfig.fromJson(params);
+    final inputJql =
+        ((params['inputJql'] as String?) ?? inputConfig.jql ?? '').trim();
     if (inputJql.isEmpty) {
+      final explicitKey = inputConfig.ticket;
+      if (explicitKey != null && explicitKey.isNotEmpty) {
+        final fetched = TicketSmartSources(propertyReader ?? PropertyReader())
+            .fetchTicketByKey(explicitKey);
+        return _runTickets([
+          {'key': explicitKey, 'fields': <String, dynamic>{}, ...?fetched},
+        ]);
+      }
       // Issues-driven pass-through: the caller prepared `input/ticket.md`
       // (e.g. the ai-teammate workflow wrote the issue body). Run
       // the config AS-IS through one [CliAgent] with a synthetic ticket —
@@ -330,9 +342,12 @@ class TeammateJob {
 /// for the keys, then `jira_get_ticket` + `jira_get_comments` hydration so
 /// the input folder carries the full ticket text and comments
 /// (Java `TicketContext.prepareContext` parity).
-Future<List<Map<String, dynamic>>> jiraTicketSource(String inputJql) async {
-  final dispatcher = SyncToolDispatcher(PropertyReader());
-  final raw = dispatcher.execute('jira_search_by_jql', {
+Future<List<Map<String, dynamic>>> jiraTicketSource(
+  String inputJql, {
+  String? Function(String toolName, Map<String, dynamic> args)? execute,
+}) async {
+  final exec = execute ?? SyncToolDispatcher(PropertyReader()).execute;
+  final raw = exec('jira_search_by_jql', {
     'jql': inputJql,
     'fields': ['summary', 'status', 'priority', 'labels'],
   });
@@ -340,8 +355,11 @@ Future<List<Map<String, dynamic>>> jiraTicketSource(String inputJql) async {
   return [
     for (final key in keys)
       hydrateTicket(
-        rawTicket: dispatcher.execute('jira_get_ticket', {'key': key}),
-        rawComments: dispatcher.execute('jira_get_comments', {'key': key}),
+        rawTicket: exec('jira_get_ticket', {
+          'key': key,
+          'fields': ['*navigable', 'attachment'],
+        }),
+        rawComments: exec('jira_get_comments', {'key': key}),
         key: key,
       ),
   ];

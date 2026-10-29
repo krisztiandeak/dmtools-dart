@@ -26,6 +26,7 @@ import 'package:crypto/crypto.dart';
 import 'package:dmtools/src/cli/run_command_processor.dart';
 import 'package:dmtools/src/compile/agent_pack_compiler.dart'
     hide AgentPackException;
+import 'package:dmtools/src/config/property_reader.dart';
 import 'package:dmtools/src/pack/agent_pack_resolver.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
@@ -259,11 +260,15 @@ void resolutionPackRefTests() {
       final params = fixture.resolved('fa-review.json')['params'] as Map;
       final parentPrompts = (_runnerJson('agents/pr_review.json')['params']
           as Map)['cliPrompts'] as List;
-      final prompts = (params['cliPrompts'] as List).cast<String>();
-      expect(prompts, hasLength(parentPrompts.length + 1),
+      final prompts = params['cliPrompts'] as List;
+      // Runner appends: the pack verdict rules + the repo-local Java
+      // parity instruction (gh-430).
+      expect(prompts, hasLength(parentPrompts.length + 2),
           reason: 'a missing/typoed "merge": ["params.cliPrompts"] would '
               'replace the parent prompts instead of appending');
-      final verdictRules = prompts.last;
+      expect(prompts.last, '.dmtools/instructions/java_parity.md',
+          reason: 'repo-local prompt passes through unrewritten');
+      final verdictRules = prompts[prompts.length - 2] as String;
       expect(verdictRules, startsWith(fixture.packsRoot.path),
           reason: 'the pack: ref must resolve into the pack cache');
       expect(verdictRules,
@@ -271,9 +276,19 @@ void resolutionPackRefTests() {
       expect(File(verdictRules).existsSync(), isTrue);
       // The parent's own prompts are rewritten into the cache as well;
       // literal prompt text (no file behind it) passes through untouched.
-      for (final prompt in prompts.take(parentPrompts.length)) {
-        if (prompt.startsWith(fixture.packsRoot.path)) {
-          expect(File(prompt).existsSync(), isTrue, reason: prompt);
+      for (final item in prompts.take(parentPrompts.length)) {
+        if (item is String && item.startsWith(fixture.packsRoot.path)) {
+          expect(File(item).existsSync(), isTrue, reason: item);
+        } else if (item is Map) {
+          final secPrompt = item['prompt'] as String?;
+          if (secPrompt != null &&
+              secPrompt.startsWith(fixture.packsRoot.path)) {
+            expect(File(secPrompt).existsSync(), isTrue, reason: secPrompt);
+          }
+          final cond = item['condition'] as String?;
+          if (cond != null && cond.startsWith(fixture.packsRoot.path)) {
+            expect(File(cond).existsSync(), isTrue, reason: cond);
+          }
         }
       }
     });
@@ -330,15 +345,11 @@ void _copyTree(Directory src, Directory dst) {
   }
 }
 
-/// gh-152: `agents/scripts/providers/fa.sh` refuses to boot the fa CLI
-/// without the `FA_PROVIDER_TYPE` + `FA_PROVIDER_CONFIG` env preconfig —
-/// the wrapper validates it BEFORE anything else, and `FA_PROVIDERS_QUEUE`
-/// is a pass-through it never reads. The review runner shipped with only
-/// the queue, so EVERY review leg died at boot
-/// ("FA_PROVIDER_TYPE environment variable is required for fa provider" —
-/// runs 35287528424 / 35290678499), `outputs/pr_review.json` was never
-/// written, and the SM ping-ponged review ↔ rework forever. These pins
-/// make the boot contract unmissable for every runner config.js selects.
+/// De-hardcoded runner contract: runners declare `DEFAULT_TRACKER: "github"`,
+/// `AI_AGENT_PROVIDER: "fa"`, and `FA_PROVIDERS_QUEUE` via `$ENV_VAR_DEV_QUEUE`
+/// or `$ENV_VAR_REVIEW_QUEUE` (resolved at runtime via `PropertyReader` env
+/// variable interpolation), without hardcoding `FA_PROVIDER_TYPE` or
+/// `FA_PROVIDER_CONFIG`.
 void faProviderPreconfigTests() {
   group('machine wiring: fa provider boot preconfig (fa.sh contract)', () {
     for (final runner in _runners) {
@@ -346,103 +357,94 @@ void faProviderPreconfigTests() {
     }
     _reviewQueueHeadPreconfigTests();
     _devQueueFallbackPreconfigTests();
+    _queueEnvInterpolationTests();
   });
 }
 
-/// Per-runner boot pins: fa.sh validates FA_PROVIDER_TYPE and
-/// FA_PROVIDER_CONFIG before anything else — a runner missing either dies
-/// at boot (before fa starts) and the SM loops the ticket forever.
+/// Per-runner boot pins: every runner sets `DEFAULT_TRACKER: "github"` and
+/// `AI_AGENT_PROVIDER: "fa"`, and does NOT hardcode `FA_PROVIDER_TYPE` or
+/// `FA_PROVIDER_CONFIG`.
 void _faBootPreconfigRunnerTests(String runner) {
   final env =
       (_runnerJson('.dmtools/runners/$runner')['params'])['envVariables']
           as Map;
 
-  test('$runner declares FA_PROVIDER_TYPE (fa.sh refuses to boot without it)',
-      () {
-    expect(env['AI_AGENT_PROVIDER'], 'fa',
-        reason: 'precondition: $runner uses the fa provider');
-    expect(
-      env['FA_PROVIDER_TYPE'],
-      allOf(isA<String>(), isNotEmpty),
-      reason: 'agents/scripts/providers/fa.sh fails with "FA_PROVIDER_TYPE '
-          'environment variable is required for fa provider" — the leg '
-          'dies before fa starts, mandatory outputs are never written, '
-          'and the SM loops the ticket (gh-152 review runs 35287528424 / '
-          '35290678499)',
-    );
+  test('$runner sets DEFAULT_TRACKER=github and AI_AGENT_PROVIDER=fa', () {
+    expect(env['DEFAULT_TRACKER'], 'github');
+    expect(env['AI_AGENT_PROVIDER'], 'fa');
   });
 
   test(
-      '$runner declares a parseable FA_PROVIDER_CONFIG with '
-      'baseUrl/model/apiKeyEnvVar', () {
-    expect(
-      env['FA_PROVIDER_CONFIG'],
-      allOf(isA<String>(), isNotEmpty),
-      reason: 'agents/scripts/providers/fa.sh fails with "FA_PROVIDER_CONFIG '
-          'is required for fa provider" — same boot-loop effect as a '
-          'missing FA_PROVIDER_TYPE (gh-152 review runs 35287528424 / '
-          '35290678499)',
-    );
-    final config = jsonDecode(env['FA_PROVIDER_CONFIG'] as String) as Map;
-    for (final key in ['baseUrl', 'model', 'apiKeyEnvVar']) {
-      expect(config[key], allOf(isA<String>(), isNotEmpty),
-          reason: 'the fa.sh boot contract makes "$key" mandatory in '
-              'FA_PROVIDER_CONFIG (fa never guesses catalog defaults)');
-    }
+      '$runner does not hardcode FA_PROVIDER_TYPE or FA_PROVIDER_CONFIG '
+      '(derived from FA_PROVIDERS_QUEUE at runtime)', () {
+    expect(env.containsKey('FA_PROVIDER_TYPE'), isFalse);
+    expect(env.containsKey('FA_PROVIDER_CONFIG'), isFalse);
+    expect(env['FA_PROVIDERS_QUEUE'], allOf(isA<String>(), startsWith(r'$')));
   });
 }
 
-/// The review runner must pin its DESIGNED primary (copilot/
-/// claude-sonnet-5.5 since 2026-10-13 — the 429-blocked zai glm-5.3-flash
-/// demoted to the queue tail; before that zai parity since 2026-09-22,
-/// before that kimi/k3) so the wrapper guard passes, while the queue stays
-/// wired for fa builds that consume the failover.
 void _reviewQueueHeadPreconfigTests() {
-  test(
-      'review runner pins its designed primary (copilot/claude-sonnet-5.5) '
-      'and keeps the failover queue', () {
+  test('review runner sets FA_PROVIDERS_QUEUE to \$ENV_VAR_REVIEW_QUEUE', () {
     final env = (_runnerJson(
         '.dmtools/runners/fa-review.json')['params'])['envVariables'] as Map;
-    expect(env['FA_PROVIDER_TYPE'], 'copilot',
-        reason: 'the designed primary is copilot/claude-sonnet-5.5 via the '
-            'enterprise GitHub Copilot endpoint');
-    final config = jsonDecode(env['FA_PROVIDER_CONFIG'] as String) as Map;
-    expect(config['baseUrl'], 'https://api.enterprise.githubcopilot.com');
-    expect(config['model'], 'claude-sonnet-5.5');
-    expect(config['apiKeyEnvVar'], 'COPILOT_EPAM_KEY',
-        reason: 'the factory maps it via the generic CUSTOM_PROVIDER_KEY1 '
-            'slot (stub: slot 1 ← repo secret COPILOT_EPAM_KEY)');
-    expect(env.containsKey('FA_PROVIDERS_QUEUE'), isTrue);
+    expect(env['FA_PROVIDERS_QUEUE'], r'$ENV_VAR_REVIEW_QUEUE');
   });
 }
 
 void _devQueueFallbackPreconfigTests() {
-  // GLM weekly-limit 429s killed the dev leg with exit 1 (no fallback) —
-  // the dev legs must carry a failover queue: copilot/claude-haiku-5.5
-  // head (since 2026-10-13), kimi-for-coding cooldown, zai/glm-5.3-flash
-  // tail.
   for (final runner in ['fa-bug-dev', 'fa-story-dev', 'fa-rework']) {
-    test(
-        '$runner declares the fallback queue (copilot/claude-haiku → '
-        'kimi → zai/glm)', () {
+    test('$runner sets FA_PROVIDERS_QUEUE to \$ENV_VAR_DEV_QUEUE', () {
       final env = (_runnerJson(
           '.dmtools/runners/$runner.json')['params'])['envVariables'] as Map;
-      expect(env.containsKey('FA_PROVIDERS_QUEUE'), isTrue,
-          reason: 'single-provider preconfig dies hard on provider 429s');
-      final queue =
-          jsonDecode(env['FA_PROVIDERS_QUEUE'] as String) as List<dynamic>;
-      expect(queue, hasLength(3));
-      final head = (queue[0] as Map)['provider_config'] as Map;
-      expect(head['model'], 'claude-haiku-5.5');
-      expect(head['baseUrl'], 'https://api.enterprise.githubcopilot.com');
-      expect(head['apiKeyEnv'], 'COPILOT_EPAM_KEY');
-      final fallback = (queue[1] as Map)['provider_config'] as Map;
-      expect(fallback['model'], 'kimi-for-coding');
-      expect(fallback['baseUrl'], 'https://api.kimi.com/coding/v1');
-      expect(fallback['apiKeyEnv'], 'KIMI_REVIEW_KEY');
-      final tail = (queue[2] as Map)['provider_config'] as Map;
-      expect(tail['model'], 'glm-5.3-flash');
-      expect(tail['apiKeyEnv'], 'ZAI_CODE_KEY');
+      expect(env['FA_PROVIDERS_QUEUE'], r'$ENV_VAR_DEV_QUEUE');
     });
   }
+}
+
+void _queueEnvInterpolationTests() {
+  test(
+      'PropertyReader.runWithOverrides resolves \$ENV_VAR_DEV_QUEUE and '
+      '\$ENV_VAR_REVIEW_QUEUE failover queues from environment', () async {
+    const devQueueJson = '[{"provider_type":"copilot","provider_config":'
+        '{"model":"claude-haiku-5.5","apiKeyEnv":"COPILOT_EPAM_KEY"}},'
+        '{"provider_type":"kimi","provider_config":{"apiKeyEnv":"KIMI_REVIEW_KEY"}},'
+        '{"provider_type":"zai","provider_config":{"apiKeyEnv":"ZAI_CODE_KEY"}}]';
+    const reviewQueueJson = '[{"provider_type":"copilot","provider_config":'
+        '{"model":"claude-sonnet-5.5","apiKeyEnv":"COPILOT_EPAM_KEY"}},'
+        '{"provider_type":"kimi","provider_config":{"apiKeyEnv":"KIMI_REVIEW_KEY"}},'
+        '{"provider_type":"zai","provider_config":{"apiKeyEnv":"ZAI_CODE_KEY"}}]';
+    final prevIsolation = PropertyReader.testIsolation;
+    PropertyReader.testIsolation = true;
+    PropertyReader.testEnvironment['ENV_VAR_DEV_QUEUE'] = devQueueJson;
+    PropertyReader.testEnvironment['ENV_VAR_REVIEW_QUEUE'] = reviewQueueJson;
+    try {
+      final devEnv = (_runnerJson('.dmtools/runners/fa-bug-dev.json')['params']
+              ['envVariables'] as Map)
+          .cast<String, String>();
+      await PropertyReader.runWithOverrides(devEnv, () async {
+        final resolved = PropertyReader.getOverrides()['FA_PROVIDERS_QUEUE']!;
+        final queue = (jsonDecode(resolved) as List).cast<Map>();
+        expect(
+          queue.map((e) => e['provider_type']).toList(),
+          ['copilot', 'kimi', 'zai'],
+        );
+      });
+      final reviewEnv =
+          (_runnerJson('.dmtools/runners/fa-review.json')['params']
+                  ['envVariables'] as Map)
+              .cast<String, String>();
+      await PropertyReader.runWithOverrides(reviewEnv, () async {
+        final resolved = PropertyReader.getOverrides()['FA_PROVIDERS_QUEUE']!;
+        final queue = (jsonDecode(resolved) as List).cast<Map>();
+        expect(
+          queue.map((e) => e['provider_type']).toList(),
+          ['copilot', 'kimi', 'zai'],
+        );
+      });
+    } finally {
+      PropertyReader.testEnvironment.remove('ENV_VAR_DEV_QUEUE');
+      PropertyReader.testEnvironment.remove('ENV_VAR_REVIEW_QUEUE');
+      PropertyReader.testIsolation = prevIsolation;
+    }
+  });
 }

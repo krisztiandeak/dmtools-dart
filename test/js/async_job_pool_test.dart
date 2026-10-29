@@ -16,12 +16,15 @@ import 'package:test/test.dart';
 void main() {
   final fixture = _Fixture();
 
-  setUp(() async {
-    fixture.newRun();
-    await fixture.pool.boot();
+  setUpAll(() async {
+    await fixture.bootPool();
   });
 
-  tearDown(fixture.disposeRun);
+  tearDownAll(fixture.disposePool);
+
+  setUp(fixture.newTmp);
+
+  tearDown(fixture.disposeTmp);
 
   _registerJobApiCoreTests(fixture);
   _registerJobApiKnobTests(fixture);
@@ -33,7 +36,7 @@ void main() {
   _registerDrainPolicyTests(fixture);
 }
 
-/// Shared fixtures for one test run (temp dir + booted worker pool).
+/// Shared fixtures for the suite (shared 2-worker pool + per-test temp dir).
 class _Fixture {
   Directory? _tmp;
   AsyncJobPool? _pool;
@@ -41,15 +44,25 @@ class _Fixture {
   AsyncJobPool get pool => _pool!;
   Directory get tmp => _tmp!;
 
-  /// Creates a fresh temp dir and a fresh (unbooted) 2-worker pool.
-  void newRun() {
-    _tmp = Directory.systemTemp.createTempSync('dmtools_async');
+  /// Boots the shared 2-worker pool once for the suite.
+  Future<void> bootPool() async {
     _pool = AsyncJobPool(workers: 2);
+    await _pool!.boot();
   }
 
-  void disposeRun() {
+  void disposePool() {
     _pool?.dispose();
+    _pool = null;
+  }
+
+  /// Creates a fresh temp dir for a test.
+  void newTmp() {
+    _tmp = Directory.systemTemp.createTempSync('dmtools_async');
+  }
+
+  void disposeTmp() {
     _tmp?.deleteSync(recursive: true);
+    _tmp = null;
   }
 
   String writeScript(String source) {

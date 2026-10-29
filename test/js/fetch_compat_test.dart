@@ -87,6 +87,7 @@ void main() {
 
   tearDownAll(() {
     serverIsolate.kill(priority: Isolate.immediate);
+    SyncHttpBridge.shared.dispose();
   });
 
   setUp(() {

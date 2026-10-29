@@ -216,6 +216,14 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
         elif "/logs/" in self.path:
             self._send(b"log-line-1\nlog-line-2\nlog-line-3", "text/plain")
             return
+        # GitLab job trace: raw text (the real /jobs/{id}/trace endpoint
+        # answers plain text). The echo payload rides inside as text so
+        # tests can still assert method/path after one extra decode.
+        elif self.path.endswith("/trace"):
+            self._send(
+                json.dumps(payload).encode("utf-8"), "text/plain"
+            )
+            return
         # GitLab MR-list fixture: a state=all listing answers a JSON array
         # so the client-side closed/merged filter runs.
         elif self.command == "GET" and "/merge_requests?state=all" in self.path:
@@ -518,6 +526,26 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
               and "parent-id=root-page" in self.path):
             payload.clear()
             payload["results"] = []
+        elif (self.command == "GET"
+              and "/wiki/api/v2/pages/" in self.path
+              and "/inline-comments" in self.path):
+            payload.clear()
+            if "/pages/777/" in self.path:
+                payload["results"] = [
+                    {
+                        "id": "ic-1",
+                        "resolutionStatus": "open",
+                        "properties": {"inlineOriginalSelection": "hi"},
+                        "body": {
+                            "storage": {
+                                "value": "<p>Needs clarification</p>",
+                                "representation": "storage",
+                            }
+                        },
+                    }
+                ]
+            else:
+                payload["results"] = []
         # v2 page object (contentById / updatePage version read / engine
         # getContent): version, ancestors, and a storage body in one shape.
         elif (self.command == "GET"
@@ -594,6 +622,57 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
             return
         if self.path.startswith("/download/attachments/"):
             self._send(b"PNG-fixture-bytes", "application/octet-stream")
+            return
+        # Jira Cloud attachment 303 redirect fixture (gh-461):
+        # /rest/api/2/attachment/content/<id> requires Authorization and
+        # responds 303 See Other to a Location (either query ?to=<url> or
+        # same-port /media/file/<id>/binary). /media/file/<id>/binary
+        # rejects requests that still carry an Authorization header (403),
+        # matching api.media.atlassian.com / S3 signed URLs.
+        if self.path.startswith("/rest/api/2/attachment/content/"):
+            if not self.headers.get("Authorization"):
+                encoded = b'{"error": "missing jira auth"}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query
+            )
+            port = self.server.server_address[1]
+            target = query.get(
+                "to", ["http://127.0.0.1:%d/media/file/1/binary" % port]
+            )[0]
+            self.send_response(303)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path.startswith("/media/file/"):
+            if self.headers.get("Authorization") or self.headers.get(
+                "X-Atlassian-Token"
+            ):
+                encoded = b'{"error": "foreign auth header rejected by CDN"}'
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
+            self._send(b"CDN-binary-bytes", "application/octet-stream")
+            return
+        if self.path.startswith("/same-origin-redir-target"):
+            if not self.headers.get("Authorization"):
+                encoded = b'{"error": "missing auth on same origin"}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
+            self._send(b"same-origin-bytes", "application/octet-stream")
             return
         # Confluence short-link redirect: /l/... answers a 302 whose
         # Location points back at the 777 page URL (contents_by_urls must
@@ -684,7 +763,11 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
         # ADO stub shapes for the WIQL two-step regression test: the WIQL
         # POST answers id/url stubs, the ids= detail GET answers full items
         # (mirrors the real dev.azure.com response envelopes).
-        if "/wit/wiql" in self.path:
+        if "/wit/wiql" in self.path and "dt-wiql-error" in body:
+            # ADO error envelope for a failed WIQL call (auth/bad query):
+            # must reach the caller as-is, not look like an empty result.
+            payload["message"] = "TF51005: query is invalid"
+        elif "/wit/wiql" in self.path:
             payload["workItems"] = [{"id": 7, "url": "stub://7"}]
         elif "/wit/workitems" in self.path and "ids=" in self.path:
             payload["count"] = 1
@@ -993,6 +1076,13 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
                     }
             payload.clear()
             payload["nodes"] = nodes
+        if (self.command == "GET"
+                and "/_apis/wit/workItems/55/comments" in self.path):
+            payload["comments"] = [{
+                "createdBy": {"displayName": "Ada"},
+                "createdDate": "2026-01-01",
+                "text": "ADO comment body",
+            }]
         response = json.dumps(payload)
         encoded = response.encode("utf-8")
         self.send_response(200)

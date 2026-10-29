@@ -37,9 +37,31 @@ void main() {
   });
 
   _testConfigDetectedListing();
+  _testConfluenceLoginPassTokenListing();
   _testScmCiVisibility();
   _testHelpSchema();
   _testListFilters();
+}
+
+void _testConfluenceLoginPassTokenListing() {
+  group('list confluence detection', () {
+    test('config-detected list includes confluence for LOGIN_PASS_TOKEN only',
+        () async {
+      _writeEnv('''
+  CONFLUENCE_BASE_PATH=https://test.atlassian.net/wiki
+  CONFLUENCE_AUTH_TYPE=Basic
+  CONFLUENCE_LOGIN_PASS_TOKEN=prebuilt
+  ''');
+      expect(await _dispatcher.dispatch(['list']), 0);
+      final confluence = _decodedTools()
+          .where((t) => t['integration'] == 'confluence')
+          .toList();
+      expect(confluence, isNotEmpty);
+      final names = confluence.map((t) => t['name'] as String).toSet();
+      expect(names, contains('confluence_get_page'));
+      expect(names, contains('confluence_test'));
+    });
+  });
 }
 
 void _testConfigDetectedListing() {
@@ -54,44 +76,41 @@ void _testConfigDetectedListing() {
       expect(tools, isNotEmpty);
       final integrations = tools.map((t) => t['integration'] as String).toSet();
       expect(
-        integrations.difference(const {'cli', 'file', 'other', 'teams_auth'}),
+        integrations.difference(const {
+          'cli',
+          'env',
+          'file',
+          'other',
+          'teams_auth',
+        }),
         isEmpty,
       );
-      expect(tools.map((t) => t['name'] as String),
-          isNot(contains('jira_get_ticket')));
-    });
-
-    test('config-detected list includes jenkins once JENKINS_* is set',
-        () async {
-      _writeEnv('''
-JENKINS_BASE_PATH=https://jenkins.example.com
-JENKINS_USER=ci
-JENKINS_API_TOKEN=tok
-''');
-      expect(await _dispatcher.dispatch(['list']), 0);
-      final jenkins =
-          _decodedTools().where((t) => t['integration'] == 'jenkins').toList();
-      expect(jenkins, isNotEmpty);
-      expect(jenkins.every((t) => (t['name'] as String).startsWith('jenkins_')),
-          isTrue);
-    });
-
-    test('DMTOOLS_INTEGRATIONS still wins verbatim over config detection',
-        () async {
-      // Documented override: jenkins is fully configured, but an explicit
-      // env subset hides it (dm.ai #570 verified behavior).
-      _writeEnv('''
-JENKINS_BASE_PATH=https://jenkins.example.com
-JENKINS_USER=ci
-JENKINS_API_TOKEN=tok
-''');
-      PropertyReader.setOverrides({'DMTOOLS_INTEGRATIONS': 'jira,cli'});
-      expect(await _dispatcher.dispatch(['list']), 0);
       expect(
-        _decodedTools().map((t) => t['integration'] as String).toSet(),
-        {'jira', 'cli'},
+        tools.map((t) => t['name'] as String),
+        isNot(contains('jira_get_ticket')),
       );
     });
+
+    _testJenkinsConfigDetection();
+
+    test(
+      'DMTOOLS_INTEGRATIONS still wins verbatim over config detection',
+      () async {
+        // Documented override: jenkins is fully configured, but an explicit
+        // env subset hides it (dm.ai #570 verified behavior).
+        _writeEnv('''
+JENKINS_BASE_PATH=https://jenkins.example.com
+JENKINS_USER=ci
+JENKINS_API_TOKEN=tok
+''');
+        PropertyReader.setOverrides({'DMTOOLS_INTEGRATIONS': 'jira,cli'});
+        expect(await _dispatcher.dispatch(['list']), 0);
+        expect(_decodedTools().map((t) => t['integration'] as String).toSet(), {
+          'jira',
+          'cli',
+        });
+      },
+    );
   });
 }
 
@@ -106,8 +125,10 @@ void _testScmCiVisibility() {
       // DEFAULT_CI resolving, so the config-detected filter must allow
       // the tags — otherwise the registered families vanish from the
       // listing in exactly this ticket's scenario (env var unset).
-      PropertyReader.setOverrides(
-          {'DEFAULT_SCM': 'github', 'DEFAULT_CI': 'actions'});
+      PropertyReader.setOverrides({
+        'DEFAULT_SCM': 'github',
+        'DEFAULT_CI': 'actions',
+      });
       expect(await _dispatcher.dispatch(['list']), 0);
       final names = _decodedTools().map((t) => t['name'] as String);
       expect(names, contains('scm_list_prs'));
@@ -136,9 +157,9 @@ void _testHelpSchema() {
       // keep working for tools outside the config-detected list.
       expect(await _dispatcher.dispatch(['jira_get_ticket', '--help']), 0);
       final result = jsonDecode(_lines.last) as Map<String, dynamic>;
-      final names = (result['tools'] as List)
-          .cast<Map<String, dynamic>>()
-          .map((t) => t['name'] as String);
+      final names = (result['tools'] as List).cast<Map<String, dynamic>>().map(
+            (t) => t['name'] as String,
+          );
       expect(names, contains('jira_get_ticket'));
     });
   });
@@ -182,7 +203,29 @@ void _writeEnv(String content) =>
 /// responses); otherwise every collected line is joined first
 /// (multi-line pretty-printed responses).
 List<Map<String, dynamic>> _decodedTools({bool lastLineOnly = false}) {
-  final decoded = jsonDecode(lastLineOnly ? _lines.last : _lines.join('\n'))
-      as Map<String, dynamic>;
+  final decoded = jsonDecode(
+    lastLineOnly ? _lines.last : _lines.join('\n'),
+  ) as Map<String, dynamic>;
   return (decoded['tools'] as List).cast<Map<String, dynamic>>();
+}
+
+void _testJenkinsConfigDetection() {
+  test(
+    'config-detected list includes jenkins once JENKINS_* is set',
+    () async {
+      _writeEnv('''
+JENKINS_BASE_PATH=https://jenkins.example.com
+JENKINS_USER=ci
+JENKINS_API_TOKEN=tok
+''');
+      expect(await _dispatcher.dispatch(['list']), 0);
+      final jenkins =
+          _decodedTools().where((t) => t['integration'] == 'jenkins').toList();
+      expect(jenkins, isNotEmpty);
+      expect(
+        jenkins.every((t) => (t['name'] as String).startsWith('jenkins_')),
+        isTrue,
+      );
+    },
+  );
 }

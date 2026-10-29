@@ -17,6 +17,10 @@ void main() {
   timerJsActionTests();
   cliErrorJsActionTests();
   cliOutputLineJsActionTests();
+  cliPromptsConditionTests();
+  cliPromptsPackConditionTests();
+  cliPromptsConditionParserTests();
+  jobParamsBindingAndPreActionSkipTests();
 }
 
 // ======================================================================
@@ -370,6 +374,232 @@ void cliOutputLineJsActionTests() {
         await tmp.delete(recursive: true);
       }
     });
+  });
+}
+
+void cliPromptsConditionTests() {
+  group('CliAgent cliPrompts condition evaluation', () {
+    test('includes section when condition returns true and skips when false',
+        () async {
+      final tmp = await _createTempDir();
+      try {
+        final condTrue = _actionJs(tmp, 'cond_true.js', 'return true;');
+        final condFalse = _actionJs(tmp, 'cond_false.js', 'return false;');
+        final result = await (CliAgent(
+          params: CliAgentParams()
+            ..cliCommands = ['cat']
+            ..cliPrompts = [
+              'BASE_PROMPT',
+              {
+                'id': 'codegraph',
+                'prompt': 'INCLUDED_SECTION',
+                'condition': condTrue.path,
+              },
+              {
+                'id': 'skipped',
+                'prompts': ['EXCLUDED_SECTION'],
+                'condition': condFalse.path,
+              },
+              'TAIL_PROMPT',
+            ]
+            ..cleanupInputFolder = false,
+          workingDirectory: tmp.path,
+        )).run();
+        final resp = result['response'] as String;
+        expect(resp, contains('BASE_PROMPT'));
+        expect(resp, contains('INCLUDED_SECTION'));
+        expect(resp, isNot(contains('EXCLUDED_SECTION')));
+        expect(resp, contains('TAIL_PROMPT'));
+      } finally {
+        await tmp.delete(recursive: true);
+      }
+    });
+  });
+}
+
+void cliPromptsPackConditionTests() {
+  group('CliAgent cliPrompts pack condition resolution', () {
+    test(
+        'resolves agents/ and pack: condition paths against workDir or unpacked pack root',
+        () async {
+      final tmp = await _createTempDir();
+      final packDir = await _createTempDir();
+      try {
+        Directory('${tmp.path}/js/conditions').createSync(recursive: true);
+        File('${tmp.path}/js/conditions/local.js')
+            .writeAsStringSync('function action() { return true; }\n');
+        File('${packDir.path}/manifest.json').writeAsStringSync('{}');
+        Directory('${packDir.path}/js/conditions').createSync(recursive: true);
+        final postJs = File('${packDir.path}/js/post.js')
+          ..writeAsStringSync('function action() {}\n');
+        File('${packDir.path}/js/conditions/packed.js')
+            .writeAsStringSync('function action() { return true; }\n');
+        final result = await (CliAgent(
+          params: CliAgentParams()
+            ..cliCommands = ['cat']
+            ..postJSAction = postJs.path
+            ..cliPrompts = [
+              {
+                'id': 'local_cg',
+                'prompt': 'LOCAL_CG_INCLUDED',
+                'condition': './agents/js/conditions/local.js',
+              },
+              {
+                'id': 'pack_cg',
+                'prompt': 'PACK_CG_INCLUDED',
+                'condition': 'pack:/agents/js/conditions/packed.js',
+              },
+              {
+                'id': 'missing_cg',
+                'prompt': 'MISSING_CG_EXCLUDED',
+                'condition': 'agents/js/conditions/missing.js',
+              },
+            ]
+            ..cleanupInputFolder = false,
+          workingDirectory: tmp.path,
+        )).run();
+        final resp = result['response'] as String;
+        expect(resp, contains('LOCAL_CG_INCLUDED'));
+        expect(resp, contains('PACK_CG_INCLUDED'));
+        expect(resp, isNot(contains('MISSING_CG_EXCLUDED')));
+      } finally {
+        await tmp.delete(recursive: true);
+        await packDir.delete(recursive: true);
+      }
+    });
+  });
+}
+
+void cliPromptsConditionParserTests() {
+  group('isCliPromptConditionMet & flattenCliPrompts', () {
+    test('isCliPromptConditionMet parses map, bool, and JSON string payloads',
+        () {
+      expect(isCliPromptConditionMet(null), isFalse);
+      expect(isCliPromptConditionMet(true), isTrue);
+      expect(isCliPromptConditionMet(false), isFalse);
+      expect(
+        isCliPromptConditionMet({'result': true, 'uncaughtException': false}),
+        isTrue,
+      );
+      expect(
+        isCliPromptConditionMet({'result': true, 'uncaughtException': true}),
+        isFalse,
+      );
+      expect(isCliPromptConditionMet('true'), isTrue);
+      expect(isCliPromptConditionMet('"true"'), isTrue);
+      expect(isCliPromptConditionMet('false'), isFalse);
+      expect(
+        isCliPromptConditionMet('{"result":true,"uncaughtException":false}'),
+        isTrue,
+      );
+      expect(
+        isCliPromptConditionMet('{"result":true,"uncaughtException":true}'),
+        isFalse,
+      );
+    });
+
+    test('flattenCliPrompts evaluates condition callback and non-map elements',
+        () {
+      final params = CliAgentParams()
+        ..cliPrompts = [
+          'p1',
+          42,
+          {'id': 's1', 'prompt': 'p2', 'condition': '  '},
+          {'id': 's2', 'prompt': 'p3', 'condition': 'yes'},
+          {'id': 's3', 'prompt': 'p4', 'condition': 'no'},
+        ];
+      expect(
+        params.flattenCliPrompts(
+          params.cliPrompts,
+          conditionEvaluator: (c) => c == 'yes',
+        ),
+        ['p1', 'p2', 'p3'],
+      );
+    });
+  });
+}
+
+void jobParamsBindingAndPreActionSkipTests() {
+  group('CliAgent params.jobParams bindings and preJSAction==false skip (#465)',
+      () {
+    _jobParamsBindingTest();
+    _preActionSkipTest();
+  });
+}
+
+void _jobParamsBindingTest() {
+  test(
+      'params.jobParams exposes customParams, metadata, initiator, and outputType',
+      () async {
+    final tmp = await _createTempDir();
+    final log = '${tmp.path}/job_params.log';
+    try {
+      final js = _actionJs(
+        tmp,
+        'check_job_params.js',
+        'var jp = params.jobParams || params; '
+            'file_write({path: "$log", content: '
+            'jp.customParams.targetRepository + "|" + '
+            'jp.metadata.agentId + "|" + '
+            'jp.initiator + "|" + '
+            'jp.outputType});',
+      );
+      await (CliAgent(
+        params: CliAgentParams()
+          ..cliCommands = ['echo done']
+          ..customParams = const {'targetRepository': 'acme/repo'}
+          ..metadata = const {'contextId': 'KEY-1', 'agentId': 'pr_review'}
+          ..initiator = 'bot-user'
+          ..outputType = 'none'
+          ..preCliJSAction = js.path
+          ..cleanupInputFolder = false,
+        workingDirectory: tmp.path,
+      )).run();
+      expect(
+        (await File(log).readAsString()).trim(),
+        'acme/repo|pr_review|bot-user|none',
+      );
+    } finally {
+      await tmp.delete(recursive: true);
+    }
+  });
+}
+
+void _preActionSkipTest() {
+  test(
+      'preJSAction returning false skips input context, preCliJSAction, cliCommands, and postJSAction',
+      () async {
+    final tmp = await _createTempDir();
+    final log = '${tmp.path}/skipped_steps.log';
+    try {
+      final pre = _actionJs(tmp, 'pre_skip.js', 'return false;');
+      final preCli = _actionJs(
+        tmp,
+        'pre_cli.js',
+        'file_append({path: "$log", content: "preCli\\n"});',
+      );
+      final post = _actionJs(
+        tmp,
+        'post.js',
+        'file_append({path: "$log", content: "post\\n"});',
+      );
+      final result = await (CliAgent(
+        params: CliAgentParams()
+          ..cliCommands = ['echo cli >> "$log"']
+          ..metadata = const {'contextId': 'KEY-99'}
+          ..preJSAction = pre.path
+          ..preCliJSAction = preCli.path
+          ..postJSAction = post.path
+          ..cleanupInputFolder = false,
+        workingDirectory: tmp.path,
+      )).run();
+      expect(result['success'], isTrue);
+      expect(result['response'], 'Skipped by pre-action');
+      expect(File(log).existsSync(), isFalse);
+      expect(Directory('${tmp.path}/input/KEY-99').existsSync(), isFalse);
+    } finally {
+      await tmp.delete(recursive: true);
+    }
   });
 }
 

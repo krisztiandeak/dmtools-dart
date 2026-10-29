@@ -5,6 +5,13 @@ ado_get_work_item:id,fields
 ado_get_work_item_comments:id,ticket
 ado_list_prs:repository,status
 ado_update_description:id,description
+# gh-427: jira_create_ticket_basic and jira_create_ticket_with_parent carry
+# a deliberate Dart-side extension — an optional `labels` string-list param.
+# The Java upstream create tools declare no labels param, so the entries
+# below freeze JAVA's param lists and this divergence is permanent until
+# upstream adopts labels (then re-extract via extract_java_tool_params.py).
+jira_create_ticket_basic:project,issueType,summary,description
+jira_create_ticket_with_parent:project,issueType,summary,description,parentKey
 confluence_create_page:title,parentId,body,space
 confluence_download_attachment:attachment,targetDir
 confluence_sync_markdown_directory:directory,parentId,space,deleteOrphans,attachmentsDir,preserveInlineComments

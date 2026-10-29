@@ -8,7 +8,7 @@ it is the spec.** This file is the operating manual: rules, commands, layout.
 ## 1. Non-negotiable rules
 
 1. **crap4dart is law.** CRAP threshold **8.0** (`crap4dart.yaml`), tool
-   pinned to **0.9.5** in CI (and locally; keep both in sync). Pre-commit hook
+   pinned to **0.14.2** in CI (and locally; keep both in sync). Pre-commit hook
    runs `crap4dart check --staged`; CI runs `check --all` + `analyze` on every push.
    Never commit on red, never weaken a gate to make code pass. Known
    exemptions live in `crap4dart.yaml` with comments (Java-parity client

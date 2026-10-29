@@ -186,7 +186,7 @@ void _reviewToolTests() {
       });
       final sent = jsonDecode(fx.lastRequestJson!) as Map<String, dynamic>;
       expect(sent['method'], 'GET');
-      expect(sent['path'], '/repos/o/r/pulls/74/reviews');
+      expect(sent['path'], '/repos/o/r/pulls/74/reviews?per_page=100&page=1');
     });
 
     test('github_dismiss_pr_review PUTs message with event DISMISS', () {

@@ -24,6 +24,7 @@ void main() {
   resultShapeTests();
   extractKeysTests();
   commentsHydrateTests();
+  jiraTicketSourceTests();
   factoryTests();
 }
 
@@ -587,6 +588,36 @@ void commentsHydrateTests() {
         key: 'C-3',
       );
       expect((ticket['fields'] as Map).containsKey('comment'), isFalse);
+    });
+  });
+}
+
+void jiraTicketSourceTests() {
+  group('Teammate jiraTicketSource', () {
+    test(
+        'requests *navigable and attachment fields on jira_get_ticket (gh-461)',
+        () async {
+      final calls = <({String tool, Map<String, dynamic> args})>[];
+      final tickets = await jiraTicketSource(
+        'key in (MAPC-8190)',
+        execute: (tool, args) {
+          calls.add((tool: tool, args: args));
+          if (tool == 'jira_search_by_jql') {
+            return '[{"key":"MAPC-8190"}]';
+          }
+          if (tool == 'jira_get_ticket') {
+            return '{"key":"MAPC-8190","fields":{"summary":"s","attachment":[{"filename":"shot.png","content":"https://x.atlassian.net/rest/api/2/attachment/content/1"}]}}';
+          }
+          return '{"comments":[]}';
+        },
+      );
+      final getCall = calls.firstWhere((c) => c.tool == 'jira_get_ticket');
+      expect(getCall.args['key'], 'MAPC-8190');
+      expect(getCall.args['fields'], ['*navigable', 'attachment']);
+      expect(
+        (tickets.single['fields'] as Map)['attachment'],
+        isA<List>(),
+      );
     });
   });
 }

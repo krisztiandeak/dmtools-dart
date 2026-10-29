@@ -715,6 +715,9 @@ class AgentPackResolver {
     'preAction',
     'postAction',
     'descriptionPath',
+    'prompt',
+    'condition',
+    'thenAction',
   };
 
   void _rewriteObject(Map<String, dynamic> obj, Directory packRoot) {
@@ -748,16 +751,11 @@ class AgentPackResolver {
   /// Maps a config string to an absolute pack-root path when it references a
   /// repo file present in the pack; returns `null` for non-path strings.
   String? _toAbsolutePackPath(String value, Directory packRoot) {
-    var ref = value.trim();
-    if (_isNonPathRef(ref)) {
+    final raw = value.trim();
+    if (_isNonPathRef(raw)) {
       return null;
     }
-    while (ref.startsWith('./')) {
-      ref = ref.substring(2);
-    }
-    if (ref.startsWith('agents/')) {
-      ref = ref.substring('agents/'.length);
-    }
+    final ref = normalizePackReferencePath(raw, rootPath: packRoot.path);
     final candidate = File(p.normalize(p.join(packRoot.path, ref)));
     if (!p.isWithin(packRoot.path, candidate.path) || !candidate.existsSync()) {
       return null;

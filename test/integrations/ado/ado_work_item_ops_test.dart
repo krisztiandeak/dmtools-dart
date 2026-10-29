@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:dmtools/dmtools.dart';
+import 'package:dmtools/src/integrations/ado/ado_work_item_ops.dart';
 import 'package:test/test.dart';
 
 import 'ado_test_support.dart';
@@ -14,6 +15,7 @@ void main() {
   _linkCreateTests();
   _fieldCodeTests();
   _attachTests();
+  _resolveFieldNameTests();
 }
 
 String router(RequestOptions o) => routeByPath({
@@ -202,3 +204,66 @@ void _attachTests() {
     });
   });
 }
+
+void _resolveFieldNameTests() {
+  group('resolveAdoFieldName', () {
+    test('maps Jira-style names (dm.ai #707 parity)', () {
+      _jiraStyleNames.forEach((name, ref) {
+        expect(resolveAdoFieldName(name), ref, reason: name);
+      });
+    });
+
+    test('is case-insensitive', () {
+      expect(resolveAdoFieldName('KEY'), 'System.Id');
+      expect(resolveAdoFieldName('Labels'), 'System.Tags');
+    });
+
+    test('existing mappings are unchanged', () {
+      expect(resolveAdoFieldName('summary'), 'System.Title');
+      expect(resolveAdoFieldName('Tags'), 'System.Tags');
+      expect(resolveAdoFieldName('storypoints'),
+          'Microsoft.VSTS.Scheduling.StoryPoints');
+    });
+
+    test('dotted and unknown names pass through unchanged', () {
+      expect(resolveAdoFieldName('Custom.Status'), 'Custom.Status');
+      expect(resolveAdoFieldName('Custom.Key'), 'Custom.Key');
+      expect(resolveAdoFieldName('mystery'), 'mystery');
+    });
+
+    test('search request carries mapped fields, never raw jira names',
+        () async {
+      final f = mockAdo((o) {
+        if (o.path.contains('wit/wiql')) {
+          return jsonEncode({
+            'workItems': [
+              {'id': 7}
+            ]
+          });
+        }
+        return jsonEncode({'value': []});
+      });
+      await f.client
+          .listWorkItems('SELECT [System.Id] FROM WorkItems', fields: [
+        resolveAdoFieldName('key'),
+        resolveAdoFieldName('labels'),
+      ]);
+      final get = f.adapter.calls.firstWhere((c) => c.method == 'GET');
+      expect(get.queryParameters['fields'], 'System.Id,System.Tags');
+      expect(get.queryParameters['fields'].toString().contains('key'), isFalse);
+    });
+  });
+}
+
+const _jiraStyleNames = {
+  'key': 'System.Id',
+  'status': 'System.State',
+  'labels': 'System.Tags',
+  'parent': 'System.Parent',
+  'updated': 'System.ChangedDate',
+  'created': 'System.CreatedDate',
+  'issuetype': 'System.WorkItemType',
+  'assignee': 'System.AssignedTo',
+  'reporter': 'System.CreatedBy',
+  'project': 'System.TeamProject',
+};

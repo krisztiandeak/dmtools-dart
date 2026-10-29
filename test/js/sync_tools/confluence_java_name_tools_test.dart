@@ -50,6 +50,7 @@ void main() {
   findOrCreateChildrenTests();
   profileToolTests();
   searchToolTests();
+  searchSpaceClauseTests();
   updateToolTests();
   contentsByUrlsTests();
   contentsByUrlsMarkdownTests();
@@ -58,6 +59,7 @@ void main() {
   downloadPagesToolTests();
   downloadPagesResolverTests();
   downloadPagesAttachmentsTests();
+  inlineCommentToolTests();
 }
 
 void contentByTitleTests() {
@@ -87,6 +89,23 @@ void contentByTitleTests() {
       );
     });
 
+    test('content_by_title falls back to default space when space is empty',
+        () {
+      final listing = jsonDecode(tools.dispatch(
+        'confluence_content_by_title',
+        {'title': 'Docs', 'space': ''},
+      )) as Map;
+      expect(listing['results'], hasLength(2));
+    });
+
+    test('content_by_title prefers explicit space over default space', () {
+      final listing = jsonDecode(tools.dispatch(
+        'confluence_content_by_title',
+        {'title': 'Docs', 'space': 'DEV'},
+      )) as Map;
+      expect(listing['results'], hasLength(2));
+    });
+
     test('content_by_title_and_space lists by title in a space', () {
       final listing = jsonDecode(tools.dispatch(
         'confluence_content_by_title_and_space',
@@ -111,6 +130,36 @@ void findToolTests() {
       final result = tools.dispatch(
           'confluence_find_content', {'title': 'Docs', 'format': 'md'});
       expect(jsonDecode(result)['body']['storage']['value'], 'found');
+    });
+
+    test('find_content falls back to default space when space is empty', () {
+      final result = tools.dispatch(
+        'confluence_find_content',
+        {'title': 'Docs', 'space': ' '},
+      );
+      expect(jsonDecode(result)['id'], '801');
+    });
+
+    test('find_content prefers explicit space over default space', () {
+      final result = tools.dispatch(
+        'confluence_find_content',
+        {'title': 'Docs', 'space': 'DEV'},
+      );
+      expect(jsonDecode(result)['id'], '801');
+    });
+
+    test('find_content requires the default space when unconfigured', () {
+      PropertyReader.setOverrides({
+        'CONFLUENCE_BASE_PATH': 'http://127.0.0.1:${server.port}',
+        'CONFLUENCE_LOGIN_PASS_TOKEN': 'conf-token',
+        'CONFLUENCE_AUTH_TYPE': 'Basic',
+        'CONFLUENCE_DEFAULT_SPACE': '',
+      });
+      expect(
+        jsonDecode(
+            tools.dispatch('confluence_find_content', {'title': 'Docs'})),
+        {'error': 'Default space not set'},
+      );
     });
 
     test('find_content_by_title_and_space returns null when empty', () {
@@ -206,20 +255,58 @@ void profileToolTests() {
 
 void searchToolTests() {
   group('confluence profile and search tools', () {
-    test('search_content_by_text builds the Java CQL and default limit', () {
+    test('search_content_by_text scopes CQL to default space when configured',
+        () {
       final body = jsonDecode(tools.dispatch(
           'confluence_search_content_by_text', {'query': 'docs'})) as Map;
       expect(body['path'], startsWith('/wiki/rest/api/content/search?'));
       expect(
         body['path'],
         contains(
-          'cql=${Uri.encodeQueryComponent('(title ~ "docs" OR text ~ "docs") ORDER BY lastModified ASC')}',
+          'cql=${Uri.encodeQueryComponent('(title ~ "docs" OR text ~ "docs") AND space = "ENG" ORDER BY lastModified ASC')}',
         ),
       );
       expect(body['path'], contains('limit=20'));
       expect(
         body['path'],
         contains('expand=title%2Cbody.excerpt%2Chistory%2Cspace'),
+      );
+    });
+
+    test(
+        'search_content_by_text omits space filter when default space is unset',
+        () {
+      PropertyReader.setOverrides({
+        'CONFLUENCE_BASE_PATH': 'http://127.0.0.1:${server.port}',
+        'CONFLUENCE_LOGIN_PASS_TOKEN': 'conf-token',
+        'CONFLUENCE_AUTH_TYPE': 'Basic',
+      });
+      final body = jsonDecode(tools.dispatch(
+          'confluence_search_content_by_text', {'query': 'docs'})) as Map;
+      expect(
+        body['path'],
+        contains(
+          'cql=${Uri.encodeQueryComponent('(title ~ "docs" OR text ~ "docs") ORDER BY lastModified ASC')}',
+        ),
+      );
+    });
+  });
+}
+
+void searchSpaceClauseTests() {
+  group('confluence search space clause and limit tools', () {
+    test(
+        'search_content_by_text skips default space when query has space clause',
+        () {
+      final body = jsonDecode(tools.dispatch(
+        'confluence_search_content_by_text',
+        {'query': 'docs AND space = "DEV"'},
+      )) as Map;
+      expect(
+        body['path'],
+        contains(
+          'cql=${Uri.encodeQueryComponent('(title ~ "docs AND space = "DEV"" OR text ~ "docs AND space = "DEV"") ORDER BY lastModified ASC')}',
+        ),
       );
     });
 
@@ -483,6 +570,38 @@ void downloadPagesAttachmentsTests() {
       final evil =
           File('${out.path}/Hi Page-attachments/evil.txt').readAsStringSync();
       expect(evil, 'CLEAN');
+    });
+  });
+}
+
+void inlineCommentToolTests() {
+  group('confluence inline comment tools', () {
+    test('get_page_inline_comments fetches v2 inline comments', () {
+      final raw = tools.dispatch('confluence_get_page_inline_comments', {
+        'pageId': '777',
+        'limit': 25,
+      });
+      final decoded = jsonDecode(raw) as Map;
+      final results = decoded['results'] as List;
+      expect(results, hasLength(1));
+      expect(results.first['id'], 'ic-1');
+    });
+
+    test('reply_to_inline_comment posts storage-formatted reply', () {
+      final raw = tools.dispatch('confluence_reply_to_inline_comment', {
+        'pageId': '777',
+        'commentId': 'ic-1',
+        'body': 'Line 1 & <tag>\n\nLine 2',
+      });
+      final decoded = jsonDecode(raw) as Map;
+      expect(decoded['method'], 'POST');
+      expect(decoded['path'], '/wiki/api/v2/inline-comments');
+      final sent = jsonDecode(decoded['body'] as String) as Map;
+      expect(sent['parentCommentId'], 'ic-1');
+      expect(
+        sent['body']['value'],
+        '<p>Line 1 &amp; &lt;tag&gt;</p>\n<p>Line 2</p>',
+      );
     });
   });
 }

@@ -10,8 +10,9 @@
 #
 # Secrets (explicit mapping): SOURCE_GITHUB_TOKEN (required by the factory),
 # Vars: FA_VERSION_MACHINE || FA_VERSION || latest, DMTOOLS_VERSION,
-# ZAI_CODE_KEY, KIMI_REVIEW_KEY (optional provider keys).
+# ENV_VAR_DEV_QUEUE, ENV_VAR_REVIEW_QUEUE (runner provider queues),
 # MAX_AUTO_REWORK_ROUNDS.
+# Optional provider secrets: ZAI_CODE_KEY, KIMI_REVIEW_KEY, COPILOT_EPAM_KEY.
 
 name: 'AI Teammate'
 
@@ -73,46 +74,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  pick:
-    # Bitrise-first picker (owner 2026-10-13): the pool is preferred, but a
-    # dead/paused pool must never park the machine on "queued forever".
-    # Canary: dispatch the short-capped pool probe and poll briefly; the
-    # probe answering fast = pool alive -> pool. Any other outcome (no
-    # pickup within the window, red, dispatch failure) -> GitHub-hosted.
-    # Worst-case added latency when the pool is down: ~90s once per run.
-    # ubuntu-slim: separate hosted capacity class — the picker must not
-    # queue behind heavy ubuntu-latest load (fa release validations etc.);
-    # it only runs gh calls (~90s).
-    runs-on: ubuntu-slim
-    outputs:
-      runner: ${{ steps.pick.outputs.runner }}
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Canary the Bitrise pool, else fall back to GitHub-hosted
-        id: pick
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          command -v gh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gh; }
-          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run bitrise-probe.yml --ref "$GITHUB_REF_NAME" || true
-          VERDICT=no-pickup
-          RUNNER=ubuntu-24.04
-          for i in $(seq 1 9); do
-            sleep 10
-            R=$(gh run list --workflow bitrise-probe.yml --created ">$TS" \
-                 --limit 1 --json status,conclusion \
-                 --jq '.[0] | "\(.status)/\(.conclusion // "-")"' 2>/dev/null || echo none)
-            case "$R" in
-              completed/success) VERDICT=pool-up;   RUNNER=bitrise-runner-dmtools-ci; break ;;
-              completed/*)       VERDICT=pool-red;  break ;;
-            esac
-          done
-          echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
-          echo "picker: $VERDICT -> $RUNNER"
-
   dedupe:
     # First-wins: the `issues` trigger fires on assigned AND labeled, so one
     # manual launch can dispatch two dev legs minutes apart (live gh-305 twin,
@@ -151,7 +112,7 @@ jobs:
           echo "duplicate=false" >> "$GITHUB_OUTPUT"
 
   factory:
-    needs: [dedupe, pick]
+    needs: [dedupe]
     if: needs.dedupe.outputs.duplicate != 'true'
     # SINGLE PIN: uses: — the FACTORY HOME ref (dmtools-agentic-workflows
     # main, always-latest per owner 2026-10-04). The old factory_ref
@@ -163,11 +124,10 @@ jobs:
       # own gates locally (dart analyze/test/format, crap4dart check)
       # before claiming success — without it they report success on
       # unfixable violations (live: #408 CRAP 9.00, #413/#414 method_size,
-      # 2026-10-16). The factory installs it via subosito/flutter-action
-      # when this input is set (cache: true); stable carries dart >= 3.9.
-      flutter-version: stable
-      # Bitrise Build Hub pool (epam-org visible; probe #229).
-      runner: ${{ needs.pick.outputs.runner }}
+      # 2026-10-16). The factory installs it via dart-lang/setup-dart@v1
+      # (~7s, vs ~90s for full Flutter SDK).
+      dart-version: stable
+      runner: ubuntu-24.04
       issue: ${{ github.event.issue.number || github.event.inputs.issue }}
       leg: ${{ github.event.inputs.leg || '' }}
       reason: ${{ github.event.inputs.reason || 'stub' }}
@@ -175,8 +135,8 @@ jobs:
       machine-author: ${{ vars.MACHINE_AUTHOR || '' }}
       # Provider-key slots (generic, awf 75c72a6): slot -> key mapping is
       # documented HERE, next to the secret reference. Slot 1 carries the
-      # copilot enterprise token (copilot provider, first in the queue —
-      # see .dmtools/runners/*.json apiKeyEnv). Slots 2-3 free.
+      # copilot enterprise token referenced by apiKeyEnv in
+      # ENV_VAR_DEV_QUEUE / ENV_VAR_REVIEW_QUEUE. Slots 2-3 free.
       CUSTOM_PROVIDER_KEY1_NAME: COPILOT_EPAM_KEY
     # Explicit mapping — the factory DECLARES SOURCE_GITHUB_TOKEN as a
     # required named secret (plus optional ZAI_CODE_KEY / KIMI_REVIEW_KEY),
@@ -190,5 +150,11 @@ jobs:
       # natively; the factory exports it into the agent job env under the
       # name given in with.CUSTOM_PROVIDER_KEY1_NAME above.
       CUSTOM_PROVIDER_KEY1: ${{ secrets.COPILOT_EPAM_KEY }}
+      # Runner provider queues (awf#60): passed into factory-teammate.yml
+      # which exports ENV_VAR_DEV_QUEUE and ENV_VAR_REVIEW_QUEUE to the agent
+      # job environment so PropertyReader.resolveEnvVariables resolves
+      # FA_PROVIDERS_QUEUE in .dmtools/runners/*.json.
+      ENV_VAR_DEV_QUEUE: ${{ vars.ENV_VAR_DEV_QUEUE }}
+      ENV_VAR_REVIEW_QUEUE: ${{ vars.ENV_VAR_REVIEW_QUEUE }}
 # DMTOOLS_PACK_REGISTRY (pack registry base) is read by the factory from
 # this repo's VARIABLE of the same name — see dmtools-agents#574.

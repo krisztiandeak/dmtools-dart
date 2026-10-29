@@ -1,5 +1,7 @@
 part of 'confluence_sync_tools.dart';
 
+typedef _AttachmentPage = ({String contentId, String pageFolder});
+
 /// Depth-first page downloader: writes each page as Markdown and
 /// optionally mirrors its attachments, then recurses into child pages
 /// down to [depth] levels (Java `ConfluencePageDownloader`, limited to
@@ -16,14 +18,45 @@ class _PageDownloader {
   final _Conf _config;
   final Directory _output;
   final bool _downloadAttachments;
+  final bool _includeComments;
+  final String? _defaultSpace;
   final ConfluenceExcerptInliner _excerptInliner;
   final ConfluenceMentionResolver _mentionResolver;
+  final Set<String> _processedIds = <String>{};
+  final Set<String> _processedUrls = <String>{};
+
+  static final RegExp _childrenMacroPattern = RegExp(
+    r'<ac:structured-macro\b[^>]*\bac:name=["\x27]children["\x27]',
+    caseSensitive: false,
+  );
+
+  static final RegExp _acLinkPagePattern = RegExp(
+    r'<ac:link\b[^>]*>[\s\S]*?<ri:page\b([^>]*?)/?>[\s\S]*?</ac:link>',
+    caseSensitive: false,
+  );
+
+  static final RegExp _titleAttrPattern = RegExp(
+    r'\bri:content-title=["\x27]([^"\x27]+)["\x27]',
+    caseSensitive: false,
+  );
+
+  static final RegExp _spaceAttrPattern = RegExp(
+    r'\bri:space-key=["\x27]([^"\x27]+)["\x27]',
+    caseSensitive: false,
+  );
 
   /// Creates a downloader writing under [_output]; the excerpt-include
   /// inliner and mention resolver reuse one HTTP-backed client (Java
   /// `ConfluencePageDownloader`, dm.ai 932e0db0 / bb1b51e9).
-  _PageDownloader(this._config, this._output, this._downloadAttachments)
-      : _excerptInliner = ConfluenceExcerptInliner(
+  _PageDownloader(
+    this._config,
+    this._output,
+    this._downloadAttachments, {
+    bool includeComments = false,
+    String? defaultSpace,
+  })  : _includeComments = includeComments,
+        _defaultSpace = defaultSpace,
+        _excerptInliner = ConfluenceExcerptInliner(
           _SyncConfluenceResolverClient(_config),
         ),
         _mentionResolver = ConfluenceMentionResolver(
@@ -34,11 +67,13 @@ class _PageDownloader {
 
   /// Pages whose attachments still need downloading (content id + the
   /// sanitized page title used as its folder name).
-  final List<({String contentId, String pageFolder})> _attachmentPages =
-      <({String contentId, String pageFolder})>[];
+  final List<_AttachmentPage> _attachmentPages = <_AttachmentPage>[];
 
   /// Downloads every seed [urls] subtree; returns the pages written.
   int download(List<String> urls, int depth) {
+    for (final u in urls) {
+      if (u.trim().isNotEmpty) _processedUrls.add(u.trim());
+    }
     for (final content in _resolveSeeds(urls)) {
       if (content != null) _downloadPage(content, depth);
     }
@@ -58,33 +93,174 @@ class _PageDownloader {
 
   void _downloadPage(Map<String, dynamic> content, int depth) {
     final id = content['id']?.toString();
-    if (id == null || id.isEmpty) return;
-    final body = content['body'];
-    final storage =
-        body is Map ? body['storage'] as Map<String, dynamic>? : null;
-    final value = storage?['value'];
-    if (value is! String) return;
+    if (id == null || id.isEmpty || !_processedIds.add(id)) return;
+    final value = _storageValueOf(content);
+    if (value == null) return;
     _output.createSync(recursive: true);
-    final fileName = _sanitize(content['title']?.toString() ?? id);
+    final rawTitle = content['title']?.toString() ?? id;
+    final fileName = _sanitize(rawTitle);
     File('${_output.path}/$fileName.md').writeAsStringSync(
       confluenceStorageToMarkdown(_resolvedBody(content, value)),
     );
     _written++;
+    _recordExtrasAndRecurse(content, id, rawTitle, fileName, value, depth);
+  }
+
+  String? _storageValueOf(Map<String, dynamic> content) {
+    final body = content['body'];
+    final storage =
+        body is Map ? body['storage'] as Map<String, dynamic>? : null;
+    final value = storage?['value'];
+    return value is String ? value : null;
+  }
+
+  void _recordExtrasAndRecurse(
+    Map<String, dynamic> content,
+    String id,
+    String rawTitle,
+    String fileName,
+    String value,
+    int depth,
+  ) {
+    if (_includeComments) {
+      _writeInlineComments(id, rawTitle, fileName);
+    }
     if (_downloadAttachments) {
       _attachmentPages.add((contentId: id, pageFolder: fileName));
     }
     if (depth > 1) {
-      // v1 child pages carry no body unless the request expands it —
-      // without the expand param every child bails at the
-      // `value is! String` guard below and the subtree is silently
-      // dropped (gh-191 review). The v2 children listing always carries
-      // bodies (body-format=storage is part of the request).
-      for (final child in _childrenResults(
-              syncBodyOrError(_childrenResponse(_config, id))) ??
-          const <Map<String, dynamic>>[]) {
+      for (final child in _discoverRelatedPages(content, id, value)) {
         _downloadPage(child, depth - 1);
       }
     }
+  }
+
+  /// Discovers child pages, external Confluence URLs in [storage], and
+  /// internal `<ac:link><ri:page …/></ac:link>` references (Java
+  /// `ConfluencePageDownloader.discoverRelatedPages`).
+  List<Map<String, dynamic>> _discoverRelatedPages(
+    Map<String, dynamic> page,
+    String pageId,
+    String storage,
+  ) {
+    final related = <Map<String, dynamic>>[];
+    final children = _childrenResults(
+      syncBodyOrError(_childrenResponse(_config, pageId)),
+    );
+    if (children != null) related.addAll(children);
+    related.addAll(_resolveBodyConfluenceUrls(storage));
+    related.addAll(
+      _resolveInternalPageLinks(storage, confluenceSpaceKeyOf(page)),
+    );
+    return related;
+  }
+
+  List<Map<String, dynamic>> _resolveBodyConfluenceUrls(String storage) {
+    final urls = _extractBodyUrls(storage);
+    if (urls.isEmpty) return const [];
+    final resolved = _runConfluenceParallel(_resolveJobs(_config, urls));
+    return [
+      for (final item in resolved)
+        if (item != null) item,
+    ];
+  }
+
+  List<String> _extractBodyUrls(String storage) {
+    final root = _config.rootUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (root.isEmpty) return const [];
+    final wikiIdx = root.lastIndexOf('/wiki');
+    final domain = wikiIdx >= 0 ? root.substring(0, wikiIdx) : root;
+    if (domain.isEmpty) return const [];
+    final pattern = RegExp(
+      '${RegExp.escape(domain)}/(?:wiki/|l/cp/|spaces/|pages/|display/|x/)[^"\\s|\\]\\\\<>)\x27]+',
+    );
+    final found = <String>[];
+    for (final m in pattern.allMatches(storage)) {
+      final raw = m.group(0)!.replaceAll('&amp;', '&');
+      if (!_childrenMacroPattern.hasMatch(raw) && _processedUrls.add(raw)) {
+        found.add(raw);
+      }
+    }
+    return found;
+  }
+
+  List<Map<String, dynamic>> _resolveInternalPageLinks(
+    String storage,
+    String? pageSpaceKey,
+  ) {
+    final results = <Map<String, dynamic>>[];
+    final resolver = _SyncConfluenceResolverClient(_config);
+    for (final m in _acLinkPagePattern.allMatches(storage)) {
+      final resolved =
+          _resolveAcLinkMatch(resolver, m.group(1) ?? '', pageSpaceKey);
+      if (resolved != null) results.add(resolved);
+    }
+    return results;
+  }
+
+  Map<String, dynamic>? _resolveAcLinkMatch(
+    _SyncConfluenceResolverClient resolver,
+    String attrs,
+    String? pageSpaceKey,
+  ) {
+    final title = _titleAttrPattern.firstMatch(attrs)?.group(1)?.trim();
+    if (title == null || title.isEmpty) return null;
+    final linkSpace = _spaceAttrPattern.firstMatch(attrs)?.group(1)?.trim();
+    final space = _firstNonEmpty([linkSpace, pageSpaceKey, _defaultSpace]);
+    return resolver.findContent(unescapeXml(title), spaceKey: space);
+  }
+
+  static String? _firstNonEmpty(List<String?> candidates) {
+    for (final c in candidates) {
+      if (c != null && c.isNotEmpty) return c;
+    }
+    return null;
+  }
+
+  void _writeInlineComments(
+    String contentId,
+    String pageTitle,
+    String fileName,
+  ) {
+    try {
+      final resp = _inlineCommentsResponse(_config, contentId, 100);
+      if (!resp.isOk) return;
+      final results = _childrenResults(resp.body);
+      if (results == null || results.isEmpty) return;
+      final md = _formatInlineCommentsMarkdown(pageTitle, results);
+      File('${_output.path}/$fileName-comments.md').writeAsStringSync(md);
+    } catch (_) {
+      // Non-fatal: inline comments are optional discussion context.
+    }
+  }
+
+  String _formatInlineCommentsMarkdown(
+    String pageTitle,
+    List<Map<String, dynamic>> comments,
+  ) {
+    final sb = StringBuffer('# Inline comments: $pageTitle\n\n');
+    for (final comment in comments) {
+      final commentId = comment['id']?.toString() ?? 'unknown';
+      final status = comment['resolutionStatus']?.toString() ?? 'unknown';
+      final body = comment['body'];
+      final storage = body is Map ? body['storage'] : null;
+      final rawStorage =
+          storage is Map ? (storage['value']?.toString() ?? '') : '';
+      final bodyMd = rawStorage.trim().isEmpty
+          ? '_(empty)_'
+          : confluenceStorageToMarkdown(rawStorage);
+      final props = comment['properties'];
+      final selection = props is Map
+          ? (props['inlineOriginalSelection']?.toString() ?? '')
+          : '';
+      sb.writeln('## Comment $commentId');
+      sb.writeln('- **Status**: $status');
+      if (selection.trim().isNotEmpty) {
+        sb.writeln('- **Selected text**: $selection');
+      }
+      sb.writeln('- **Body**:\n\n$bodyMd\n');
+    }
+    return sb.toString();
   }
 
   /// The storage body with excerpt includes materialized (resolved in the
@@ -134,7 +310,7 @@ class _PageDownloader {
   /// write target per attachment carrying a `_links.download` path.
   void _collectAttachmentJobs(
     Map<String, dynamic>? envelope,
-    ({String contentId, String pageFolder}) page,
+    _AttachmentPage page,
     List<SyncParallelJob> downloads,
     List<_AttachmentTarget> targets,
   ) {

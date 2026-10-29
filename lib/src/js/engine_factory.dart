@@ -252,13 +252,21 @@ String jsDirectoryOf(String scriptPath) {
   return scriptPath.substring(0, scriptPath.lastIndexOf('/'));
 }
 
+final Expando<Map<String, String>> _wrapperSourceCache = Expando();
+
 /// Generates tool wrapper JS for [registry], optionally narrowed by
 /// [filter].
 String buildWrapperSource(ToolRegistry registry, Set<String>? filter) {
-  final source = filter == null
-      ? registry
-      : (ToolRegistry()..registerAll(registry.toolsForIntegrations(filter)));
-  return const ToolWrapperGenerator().generate(source);
+  final byFilter = _wrapperSourceCache[registry] ??= <String, String>{};
+  final filterKey = filter == null
+      ? '${registry.allTools.length}:*'
+      : '${registry.allTools.length}:${(filter.toList()..sort()).join(',')}';
+  return byFilter.putIfAbsent(filterKey, () {
+    final source = filter == null
+        ? registry
+        : (ToolRegistry()..registerAll(registry.toolsForIntegrations(filter)));
+    return const ToolWrapperGenerator().generate(source);
+  });
 }
 
 /// Sets each [extraGlobals] entry as a top-level JS global on [rt].

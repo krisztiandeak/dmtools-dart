@@ -48,10 +48,11 @@ class AdoClient {
   /// `connection-data` endpoint returns 404 for PATs scoped to work
   /// items, while the Profile API accepts them. A PAT without the
   /// profile-read scope gets 401 from the Profile API (Java fails the
-  /// same way); this port falls back to an authenticated
-  /// `GET {org}/_apis/projects` as the connectivity proof so
-  /// work-item-scoped PATs still pass. Returns `success` plus the
-  /// user's name/email when the profile was readable.
+  /// same way). The fallback probes `GET {project}/_apis/wit/workitemtypes`
+  /// first (the scope the tools use), then `GET {org}/_apis/projects`. When
+  /// both fail, the original profile error is reported. A healthy profile
+  /// makes no extra request. Returns `success` plus the user's name/email
+  /// when the profile was readable.
   Future<Map<String, dynamic>> testConnection() async {
     try {
       final body = await _http.getProfile('profile/profiles/me');
@@ -63,20 +64,42 @@ class AdoClient {
         'email': data['emailAddress'],
       };
     } on Object catch (e) {
+      final profileStatus = e is DioException ? e.response?.statusCode : e;
+      // 1st fallback: the work-item API for the configured project — the
+      // scope the tools actually use. An empty list is not a success.
+      if (await _probeWorkItemTypes()) {
+        return {
+          'success': true,
+          'message': 'Azure DevOps connection successful '
+              '(profile unreadable: $profileStatus)',
+        };
+      }
+      // 2nd fallback: the organization-scoped projects list.
       try {
         jsonDecode(await _http.getOrg('projects'));
         return {
           'success': true,
           'message': 'Azure DevOps connection successful '
-              '(profile unreadable: ${e is DioException ? e.response?.statusCode : e})',
+              '(profile unreadable: $profileStatus)',
         };
-      } on Object catch (fallbackError) {
+      } on Object {
         return {
           'success': false,
           'message': 'Azure DevOps connection failed',
-          'error': fallbackError.toString(),
+          'error': e.toString(),
         };
       }
+    }
+  }
+
+  /// Returns true when `wit/workitemtypes` for the configured project answers
+  /// with a non-empty list. Any transport or decode error counts as false.
+  Future<bool> _probeWorkItemTypes() async {
+    try {
+      final types = await getWorkItemTypes('');
+      return types.isNotEmpty;
+    } on Object {
+      return false;
     }
   }
 
@@ -136,8 +159,10 @@ class AdoClient {
   }
 
   /// `ado_get_work_items` — GET `wit/workitems?ids=1,2,...`.
-  Future<List<Map<String, dynamic>>> getWorkItems(List<int> ids,
-      {List<String>? fields}) async {
+  Future<List<Map<String, dynamic>>> getWorkItems(
+    List<int> ids, {
+    List<String>? fields,
+  }) async {
     final body = await _http.get(
       'wit/workitems',
       queryParams: {
@@ -158,16 +183,16 @@ class AdoClient {
   /// Mirrors Java `searchAndPerform`: the WIQL response carries only
   /// id/url stubs, so the ids are re-fetched via [getWorkItems] in
   /// batches of 200 (the ADO limit).
-  Future<List<Map<String, dynamic>>> listWorkItems(String wiql,
-      {List<String>? fields}) async {
+  Future<List<Map<String, dynamic>>> listWorkItems(
+    String wiql, {
+    List<String>? fields,
+  }) async {
     final body = await _http.post(
       'wit/wiql',
       body: jsonEncode({'query': expandWiql(wiql)}),
     );
     final decoded = jsonDecode(body);
-    final ids = decoded is Map && decoded['workItems'] is List
-        ? wiqlStubIds(decoded['workItems'] as List)
-        : const <int>[];
+    final ids = decoded is Map ? extractWorkItemIds(decoded) : const <int>[];
     final results = <Map<String, dynamic>>[];
     for (final batch in batchIds(ids)) {
       results.addAll(await getWorkItems(batch, fields: fields));
@@ -225,7 +250,7 @@ class AdoClient {
     final body = await _http.post(
       'build/builds',
       body: jsonEncode({
-        'definition': {'id': definitionId}
+        'definition': {'id': definitionId},
       }),
     );
     return jsonDecode(body) as Map<String, dynamic>;
@@ -285,10 +310,12 @@ class AdoClient {
     if (searchCriteria == null) {
       return _decodeList(await _http.get('git/repositories/$repoId/commits'));
     }
-    return _decodeList(await _http.post(
-      'git/repositories/$repoId/commitsbatch',
-      body: jsonEncode(searchCriteria),
-    ));
+    return _decodeList(
+      await _http.post(
+        'git/repositories/$repoId/commitsbatch',
+        body: jsonEncode(searchCriteria),
+      ),
+    );
   }
 
   /// `ado_get_pull_request_reviewers` — GET

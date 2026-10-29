@@ -158,26 +158,43 @@ class TrackerGitHubRouter {
     return '${parts[0].trim()}/${parts[1].trim()}';
   }
 
+  /// Label add/remove share the `args['label']` extraction — split out of
+  /// [_routeKeyTool] to keep both under the crap4dart complexity budget.
+  String? _routeLabelTool(
+    String toolName,
+    _GhRouteConfig c,
+    String number,
+    Map<String, dynamic> args,
+  ) {
+    if (toolName == 'jira_add_label') {
+      return _addLabel(c, number, syncAsStr(args['label']));
+    }
+    if (toolName == 'jira_remove_label') {
+      return _removeLabel(c, number, syncAsStr(args['label']));
+    }
+    return null;
+  }
+
   /// Dispatches a routed ticket tool to its GitHub Issues mapping.
   String _routeKeyTool(
     String toolName,
     String number,
     _GhRouteConfig c,
     Map<String, dynamic> args,
-  ) =>
-      switch (toolName) {
-        'jira_get_ticket' =>
-          _withIssue(c, number, (i) => jsonEncode(_ticketFromIssue(i))),
-        'jira_get_comments' => _getComments(c, number),
-        'jira_post_comment' =>
-          _postComment(c, number, syncAsStr(args['comment'])),
-        'jira_add_label' => _addLabel(c, number, syncAsStr(args['label'])),
-        'jira_remove_label' =>
-          _removeLabel(c, number, syncAsStr(args['label'])),
-        'jira_move_to_status' =>
-          _moveToStatus(c, number, syncAsStr(args['statusName'])),
-        _ => syncErr('Unsupported tracker tool: $toolName'),
-      };
+  ) {
+    final labelTool = _routeLabelTool(toolName, c, number, args);
+    if (labelTool != null) return labelTool;
+    return switch (toolName) {
+      'jira_get_ticket' =>
+        _withIssue(c, number, (i) => jsonEncode(_ticketFromIssue(i))),
+      'jira_get_comments' => _getComments(c, number),
+      'jira_post_comment' =>
+        _postComment(c, number, syncAsStr(args['comment'])),
+      'jira_move_to_status' =>
+        _moveToStatus(c, number, syncAsStr(args['statusName'])),
+      _ => syncErr('Unsupported tracker tool: $toolName'),
+    };
+  }
 
   String _issueUrl(_GhRouteConfig c, String number) =>
       '${c.baseUrl}/repos/${c.repoSeg}/issues/$number';

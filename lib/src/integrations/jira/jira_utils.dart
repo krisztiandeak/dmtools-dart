@@ -3,6 +3,31 @@ library;
 
 import 'dart:convert';
 
+/// Reads the create-tool `labels` argument as `List<String>?`.
+///
+/// Strict by design (gh-427): `labels` must arrive as a JSON string array.
+/// Unlike the read-side `fields` params (which comma-split bare strings), a
+/// comma is a legal label character, so any other shape throws a loud
+/// [ArgumentError] — the caller sees the rejection instead of the argument
+/// being dropped from the create payload.
+List<String>? jiraCreateLabelsArg(Map<String, dynamic> args) {
+  final value = args['labels'];
+  if (value == null) return null;
+  if (value is List) {
+    for (final entry in value) {
+      if (entry is! String) {
+        throw ArgumentError(
+          'labels must be a list of strings; '
+          "got entry '$entry' (${entry.runtimeType})",
+        );
+      }
+    }
+    return List<String>.from(value);
+  }
+  throw ArgumentError(
+      'labels must be a list of strings; got ${value.runtimeType}');
+}
+
 /// Finds a transition id in [transitions] matching [statusName].
 ///
 /// Matches by transition name or destination status name (case-insensitive).

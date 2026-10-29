@@ -44,6 +44,7 @@ void main() {
   encryptionScanTests();
   pathRewriteTests();
   pathRewriteNestedTests();
+  pathRewriteStructuredPromptsTests();
   pathRewriteUntouchedTests();
 }
 
@@ -154,28 +155,16 @@ void entryOverrideTests() {
 /// Zip-slip protection (AC4).
 void zipSlipTests() {
   group('AgentPackResolver zip-slip', () {
-    test('rejects ../ escape entries before unpacking', () {
-      final zip = buildMalicious('../evil.sh');
-      expect(
-        () => resolver.resolve(zip.path),
-        throwsA(isA<AgentPackException>()),
-      );
-      expect(
-        Directory(p.join(packsRoot.path, 'evil-1.0.0')).existsSync(),
-        isFalse,
-      );
-    });
-
-    test('rejects absolute-path entries before unpacking', () {
-      final zip = buildMalicious('/abs/evil.sh');
-      expect(
-        () => resolver.resolve(zip.path),
-        throwsA(isA<AgentPackException>()),
-      );
-      expect(
-        Directory(p.join(packsRoot.path, 'evil-1.0.0')).existsSync(),
-        isFalse,
-      );
+    test('rejects ../ escape and absolute-path entries before unpacking', () {
+      for (final bad in ['../evil.sh', '/abs/evil.sh']) {
+        final zip = buildMalicious(bad);
+        expect(() => resolver.resolve(zip.path),
+            throwsA(isA<AgentPackException>()));
+        expect(
+          Directory(p.join(packsRoot.path, 'evil-1.0.0')).existsSync(),
+          isFalse,
+        );
+      }
     });
   });
 }
@@ -253,35 +242,20 @@ void manifestIdentityTests() {
           ],
         };
 
-    test('rejects an agent with a path separator', () {
-      final zip = buildZipWithManifest(manifest('../evil', '1.0.0'), {
-        'a.json': utf8.encode('{}'),
-      });
+    test('rejects path-separator agent and dots-only version', () {
+      final badAgent = buildZipWithManifest(
+          manifest('../evil', '1.0.0'), {'a.json': utf8.encode('{}')});
       expect(
-        () => resolver.resolve(zip.path),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('Unsafe manifest agent'),
-          ),
-        ),
+        () => resolver.resolve(badAgent.path),
+        throwsA(isA<AgentPackException>().having(
+            (e) => e.message, 'message', contains('Unsafe manifest agent'))),
       );
-    });
-
-    test('rejects a dots-only version (..)', () {
-      final zip = buildZipWithManifest(manifest('ok_agent', '..'), {
-        'a.json': utf8.encode('{}'),
-      });
+      final badVer = buildZipWithManifest(
+          manifest('ok_agent', '..'), {'a.json': utf8.encode('{}')});
       expect(
-        () => resolver.resolve(zip.path),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('Unsafe manifest version'),
-          ),
-        ),
+        () => resolver.resolve(badVer.path),
+        throwsA(isA<AgentPackException>().having(
+            (e) => e.message, 'message', contains('Unsafe manifest version'))),
       );
     });
 
@@ -304,37 +278,23 @@ void manifestIdentityTests() {
 /// against the pack root (PR #249 review).
 void entryContainmentTests() {
   group('AgentPackResolver entry containment', () {
-    test('rejects a defaultEntry that escapes the pack root', () {
-      final zip = buildZipWithManifest({
+    test('rejects defaultEntry and #entry override that escape pack root', () {
+      final badDefault = buildZipWithManifest({
         'agent': 'ok_agent',
         'version': '1.0.0',
         'defaultEntry': '../escape.json',
         'files': <dynamic>[],
       }, {});
-      expect(
-        () => resolver.resolve(zip.path),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('escapes the pack root'),
-          ),
-        ),
-      );
-    });
-
-    test('rejects a #entry override that escapes the pack root', () {
-      final zip = buildPack('my_agent', '1.0.0');
-      expect(
-        () => resolver.resolve('${zip.path}#../escape.json'),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('escapes the pack root'),
-          ),
-        ),
-      );
+      for (final target in [
+        badDefault.path,
+        '${buildPack('my_agent', '1.0.0').path}#../escape.json',
+      ]) {
+        expect(
+          () => resolver.resolve(target),
+          throwsA(isA<AgentPackException>().having(
+              (e) => e.message, 'message', contains('escapes the pack root'))),
+        );
+      }
     });
   });
 }
@@ -595,41 +555,28 @@ void execBitTests() {
 /// Typed manifest reads (PR #249 review suggestion: no bare TypeError).
 void manifestCastTests() {
   group('AgentPackResolver manifest casts', () {
-    test('a non-string agent fails with a clean AgentPackException', () {
-      final zip = buildZipWithManifest({
+    test('non-string agent or defaultEntry fails with AgentPackException', () {
+      final badAgent = buildZipWithManifest({
         'agent': 123,
         'version': '1.0.0',
         'defaultEntry': 'a.json',
         'files': <dynamic>[],
       }, {});
       expect(
-        () => resolver.resolve(zip.path),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('must be a string'),
-          ),
-        ),
+        () => resolver.resolve(badAgent.path),
+        throwsA(isA<AgentPackException>()
+            .having((e) => e.message, 'message', contains('must be a string'))),
       );
-    });
-
-    test('a non-string defaultEntry fails with a clean AgentPackException', () {
-      final zip = buildZipWithManifest({
+      final badEntry = buildZipWithManifest({
         'agent': 'ok_agent',
         'version': '1.0.0',
         'defaultEntry': 42,
         'files': <dynamic>[],
       }, {});
       expect(
-        () => resolver.resolve(zip.path),
-        throwsA(
-          isA<AgentPackException>().having(
-            (e) => e.message,
-            'message',
-            contains('defaultEntry'),
-          ),
-        ),
+        () => resolver.resolve(badEntry.path),
+        throwsA(isA<AgentPackException>()
+            .having((e) => e.message, 'message', contains('defaultEntry'))),
       );
     });
   });
@@ -749,6 +696,48 @@ void pathRewriteNestedTests() {
         nestedList[0],
         File(p.join(pack.packRoot.path, 'js/main.js')).absolute.path,
       );
+    });
+  });
+}
+
+void pathRewriteStructuredPromptsTests() {
+  group('AgentPackResolver.rewritePathsToPackRoot structured cliPrompts', () {
+    test(
+        'rewrites structured cliPrompts section prompt, prompts, condition, and thenAction',
+        () {
+      final pack = resolver.resolve(buildPack('my_agent', '1.0.0').path);
+      final config = <String, dynamic>{
+        'params': {
+          'cliPrompts': [
+            {
+              'id': 'codegraph',
+              'prompt': './agents/instructions/common/guide.md',
+              'prompts': ['agents/instructions/common/guide.md'],
+              'condition': 'agents/js/main.js',
+            },
+          ],
+          'customParams': {
+            'contentOutput': {
+              'thenAction': 'main.js',
+            },
+          },
+        },
+      };
+      resolver.rewritePathsToPackRoot(config, pack.packRoot);
+      final params = config['params'] as Map<String, dynamic>;
+      final section = (params['cliPrompts'] as List)[0] as Map<String, dynamic>;
+      final expectedGuide =
+          File(p.join(pack.packRoot.path, 'instructions/common/guide.md'))
+              .absolute
+              .path;
+      final expectedJs =
+          File(p.join(pack.packRoot.path, 'js/main.js')).absolute.path;
+      expect(section['prompt'], expectedGuide);
+      expect((section['prompts'] as List)[0], expectedGuide);
+      expect(section['condition'], expectedJs);
+      final contentOut =
+          (params['customParams'] as Map)['contentOutput'] as Map;
+      expect(contentOut['thenAction'], expectedJs);
     });
   });
 }

@@ -20,6 +20,11 @@ import '../config/property_reader.dart';
 import '../config/property_reader_getters.dart';
 import '../pack/agent_pack_resolver.dart';
 
+const _kParamsCliPrompts = 'params.cliPrompts';
+
+/// Global shell-level verbosity flags ignored during `run` argument extraction.
+const _kRunShellFlags = {'--verbose', '--debug', '--quiet'};
+
 /// Processes `dmtools run` command arguments into resolved config JSON.
 class RunCommandProcessor {
   /// Creates a run-command processor. [packResolver] is a test seam for the
@@ -88,7 +93,9 @@ class RunCommandProcessor {
     var i = 0;
     while (i < remaining.length) {
       final arg = remaining[i];
-      if (arg.startsWith('--')) {
+      if (_kRunShellFlags.contains(arg)) {
+        i++;
+      } else if (arg.startsWith('--')) {
         final key = arg.substring(2);
         if (i + 1 < remaining.length) {
           overrides[key] = remaining[i + 1];
@@ -201,13 +208,14 @@ class RunCommandProcessor {
     }
     final raw = file.readAsStringSync();
     var config = jsonDecode(raw) as Map<String, dynamic>;
-    config = _ParentConfigResolver(packResolver: _packResolver)
-        .resolve(config, file.parent.path);
-    if (packRoot != null) {
-      AgentPackResolver().rewritePathsToPackRoot(config, packRoot);
-    }
-    config = _applyEncodedConfig(config, runArgs.encodedConfig);
+    final resolved = _ParentConfigResolver(packResolver: _packResolver)
+        .resolveWithPack(config, file.parent.path);
+    final effectivePackRoot = packRoot ?? resolved.packRoot;
+    config = _applyEncodedConfig(resolved.config, runArgs.encodedConfig);
     _injectParams(config, runArgs.overrides);
+    if (effectivePackRoot != null) {
+      AgentPackResolver().rewritePathsToPackRoot(config, effectivePackRoot);
+    }
     return jsonEncode(config);
   }
 
@@ -257,6 +265,11 @@ class _RunArgs {
 // Parent-config resolution
 // ======================================================================
 
+typedef _ResolvedParentConfig = ({
+  Map<String, dynamic> config,
+  Directory? packRoot,
+});
+
 /// Simplified port of Java `ParentConfigResolver`.
 ///
 /// Walks the `"parent"` chain declared in a config, deep-merging each child
@@ -273,23 +286,38 @@ class _ParentConfigResolver {
   ///
   /// [configDir] is the directory of the file that [child] was loaded from;
   /// parent paths are resolved relative to it.
-  Map<String, dynamic> resolve(Map<String, dynamic> child, String configDir) {
+  Map<String, dynamic> resolve(
+    Map<String, dynamic> child,
+    String configDir, {
+    bool rebaseActions = true,
+  }) =>
+      resolveWithPack(child, configDir, rebaseActions: rebaseActions).config;
+
+  /// Resolves [child] and returns both the merged config and the nearest
+  /// ancestor [packRoot] when inherited from an agent pack.
+  _ResolvedParentConfig resolveWithPack(
+    Map<String, dynamic> child,
+    String configDir, {
+    bool rebaseActions = true,
+  }) {
+    if (rebaseActions) _rebaseActionPaths(child, configDir);
     final parentBlock = child['parent'];
     if (parentBlock is! Map<String, dynamic>) {
-      return _stripMeta(child);
+      return (config: _stripMeta(child), packRoot: null);
     }
     final path = parentBlock['path'];
     if (path is! String) {
-      return _stripMeta(child);
+      return (config: _stripMeta(child), packRoot: null);
     }
     final loaded = _loadAndResolve(path, configDir);
     final overridePaths = _readStringList(child, 'override');
     final mergePaths = _readStringList(child, 'merge');
     final strippedChild = _stripMeta(child);
     if (loaded.packRoot != null) {
-      // The parent is an agent pack: the child's `pack:` references point
-      // inside it (zip flow — no agents checkout mounted, dm.ai parity).
+      // The parent is an agent pack: the child's `pack:` references and
+      // repo-relative paths point inside it (zip flow — no agents checkout).
       _rewritePackRefs(strippedChild, loaded.packRoot!);
+      _packResolver.rewritePathsToPackRoot(strippedChild, loaded.packRoot!);
     } else if (_containsPackRef(strippedChild)) {
       throw ArgumentError.value(
         path,
@@ -297,19 +325,52 @@ class _ParentConfigResolver {
         'child config uses pack: references but its parent is not an agent pack',
       );
     }
-    return _mergeWithDirectives(
-      loaded.config,
-      strippedChild,
-      overridePaths,
-      mergePaths,
+    return (
+      config: _mergeWithDirectives(
+        loaded.config,
+        strippedChild,
+        overridePaths,
+        mergePaths,
+      ),
+      packRoot: loaded.packRoot,
     );
   }
+
+  /// Rebases the JS/script action fields of [config] to [configDir] (gh-409).
+  ///
+  /// A relative action path is resolved against the config file's directory
+  /// when that file exists there; otherwise it is left untouched so the
+  /// legacy CWD-relative resolution still applies (Java-compatible
+  /// fallback). Absolute paths and `pack:` refs are never rewritten.
+  void _rebaseActionPaths(Map<String, dynamic> config, String configDir) {
+    for (final key in _actionPathKeys) {
+      final value = config[key];
+      if (value is! String) continue;
+      final trimmed = value.trim();
+      if (trimmed.isEmpty ||
+          p.isAbsolute(trimmed) ||
+          trimmed.startsWith(_packScheme)) {
+        continue;
+      }
+      final candidate = p.join(configDir, trimmed);
+      if (File(candidate).existsSync()) config[key] = candidate;
+    }
+  }
+
+  /// Config keys holding a script/action path resolved relative to the
+  /// config file (gh-409 AC3).
+  static const List<String> _actionPathKeys = [
+    'thenAction',
+    'preJSAction',
+    'postJSAction',
+    'preCliJSAction',
+  ];
 
   /// Loads the parent config (filesystem path or agent pack ref) and
   /// recursively resolves it. Returns the resolved config plus the pack
   /// root when the parent came from an agent pack, so the caller can
   /// resolve the child's `pack:` references against it.
-  ({Map<String, dynamic> config, Directory? packRoot}) _loadAndResolve(
+  _ResolvedParentConfig _loadAndResolve(
     String parentPath,
     String configDir,
   ) {
@@ -325,7 +386,12 @@ class _ParentConfigResolver {
       );
       final json =
           jsonDecode(pack.entryFile.readAsStringSync()) as Map<String, dynamic>;
-      final config = resolve(json, pack.entryFile.parent.path);
+      // Pack entries keep their pack-root rewriting (no config-dir rebase).
+      final config = resolve(
+        json,
+        pack.entryFile.parent.path,
+        rebaseActions: false,
+      );
       _packResolver.rewritePathsToPackRoot(config, pack.packRoot);
       // `pack:` references inside the entry config resolve against this
       // same pack.
@@ -347,7 +413,7 @@ class _ParentConfigResolver {
     }
     final file = File('$configDir/$parentPath');
     final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-    return (config: resolve(json, file.parent.path), packRoot: null);
+    return resolveWithPack(json, file.parent.path);
   }
 
   /// Scheme prefix marking a config string as a reference into the resolved
@@ -445,10 +511,16 @@ class _ParentConfigResolver {
     for (final path in mergePaths) {
       _applyMergeDirective(result, parent, child, path);
     }
+    if (!overridePaths.contains(_kParamsCliPrompts) &&
+        !mergePaths.contains(_kParamsCliPrompts)) {
+      _applyStructuredCliPromptsMerge(result, parent, child);
+    }
     return result;
   }
 
   /// Concatenates parent + child arrays at [path] inside [result].
+  /// For `params.cliPrompts`, if either side contains section objects, merges
+  /// sections by `id` (Java `CliPromptsConfig.merge` parity).
   void _applyMergeDirective(
     Map<String, dynamic> result,
     Map<String, dynamic> parent,
@@ -458,10 +530,50 @@ class _ParentConfigResolver {
     final parentValue = _getByPath(parent, path);
     final childValue = _getByPath(child, path);
     if (parentValue is List && childValue is List) {
-      _setByPath(result, path, [...parentValue, ...childValue]);
+      if (path == _kParamsCliPrompts &&
+          (_containsStructuredPrompts(parentValue) ||
+              _containsStructuredPrompts(childValue))) {
+        _setByPath(
+          result,
+          path,
+          _mergeStructuredCliPrompts(parentValue, childValue),
+        );
+      } else {
+        _setByPath(result, path, [...parentValue, ...childValue]);
+      }
     }
   }
 
+  /// Merges structured `params.cliPrompts` by section `id` when either parent
+  /// or child uses section objects (Java `ParentConfigResolver` parity).
+  void _applyStructuredCliPromptsMerge(
+    Map<String, dynamic> result,
+    Map<String, dynamic> parent,
+    Map<String, dynamic> child,
+  ) {
+    final parentValue = _getByPath(parent, _kParamsCliPrompts);
+    final childValue = _getByPath(child, _kParamsCliPrompts);
+    if (parentValue is! List || childValue is! List) return;
+    if (_containsStructuredPrompts(parentValue) ||
+        _containsStructuredPrompts(childValue)) {
+      _setByPath(
+        result,
+        _kParamsCliPrompts,
+        _mergeStructuredCliPrompts(parentValue, childValue),
+      );
+    }
+  }
+
+  bool _containsStructuredPrompts(List<dynamic> list) =>
+      list.any((item) => item is Map);
+
+  List<dynamic> _mergeStructuredCliPrompts(
+    List<dynamic> baseList,
+    List<dynamic> overrideList,
+  ) =>
+      _mergeCliPromptSections(baseList, overrideList);
+
+  /// Reads a top-level string-list key from [config] (empty when absent).
   /// Reads a top-level string-list key from [config] (empty when absent).
   List<String> _readStringList(Map<String, dynamic> config, String key) {
     final value = config[key];
@@ -494,4 +606,97 @@ class _ParentConfigResolver {
     }
     current[parts.last] = value;
   }
+}
+
+List<dynamic> _mergeCliPromptSections(
+  List<dynamic> baseList,
+  List<dynamic> overrideList,
+) {
+  final merged = <dynamic>[];
+  for (final baseItem in baseList) {
+    if (baseItem is! Map) {
+      merged.add(baseItem);
+      continue;
+    }
+    final overrideMatch = _findSectionById(
+      overrideList,
+      baseItem['id']?.toString(),
+    );
+    merged.add(
+      overrideMatch == null
+          ? baseItem
+          : _mergeSectionMaps(baseItem, overrideMatch),
+    );
+  }
+  for (final overrideItem in overrideList) {
+    if (overrideItem is! Map ||
+        _findSectionById(baseList, overrideItem['id']?.toString()) == null) {
+      merged.add(overrideItem);
+    }
+  }
+  return merged;
+}
+
+Map<dynamic, dynamic>? _findSectionById(List<dynamic> list, String? id) {
+  if (id == null || id.isEmpty) return null;
+  for (final item in list) {
+    if (item is Map && item['id']?.toString() == id) return item;
+  }
+  return null;
+}
+
+Map<String, dynamic> _mergeSectionMaps(
+  Map<dynamic, dynamic> base,
+  Map<dynamic, dynamic> over,
+) {
+  final strategy =
+      (over['mergeStrategy']?.toString() ?? 'append').toLowerCase();
+  final out = <String, dynamic>{
+    'id': base['id'].toString(),
+    'prompts': _combineSectionPrompts(
+      _extractSectionPrompts(base),
+      _extractSectionPrompts(over),
+      strategy,
+    ),
+  };
+  _copyOptionalSectionMetadata(base, over, out);
+  return out;
+}
+
+List<String> _combineSectionPrompts(
+  List<String> basePrompts,
+  List<String> overPrompts,
+  String strategy,
+) {
+  if (strategy == 'prepend') return [...overPrompts, ...basePrompts];
+  if (strategy == 'replace') return [...overPrompts];
+  return [...basePrompts, ...overPrompts];
+}
+
+void _copyOptionalSectionMetadata(
+  Map<dynamic, dynamic> base,
+  Map<dynamic, dynamic> over,
+  Map<String, dynamic> out,
+) {
+  final baseStrategy = base['mergeStrategy']?.toString();
+  if (baseStrategy != null &&
+      baseStrategy.isNotEmpty &&
+      baseStrategy != 'append') {
+    out['mergeStrategy'] = baseStrategy;
+  }
+  final overCond = over['condition']?.toString().trim();
+  final baseCond = base['condition']?.toString().trim();
+  final cond = (overCond != null && overCond.isNotEmpty) ? overCond : baseCond;
+  if (cond != null && cond.isNotEmpty) {
+    out['condition'] = cond;
+  }
+}
+
+List<String> _extractSectionPrompts(Map<dynamic, dynamic> section) {
+  final out = <String>[];
+  final single = section['prompt'];
+  if (single is String && single.isNotEmpty) out.add(single);
+  final list = section['prompts'];
+  if (list is List) out.addAll(list.whereType<String>());
+  return out;
 }

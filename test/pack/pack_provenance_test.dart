@@ -40,5 +40,24 @@ void main() {
       expect(PackProvenance.read(dir), isNull);
       expect(PackProvenance.fromJson('nope'), isNull);
     });
+    test('normalizePackReferencePath respects root-level .js when present', () {
+      final dir = Directory.systemTemp.createTempSync('prov_norm_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      File('${dir.path}/restoreDescription.js').writeAsStringSync('// root');
+      expect(
+        normalizePackReferencePath(
+          'agents/restoreDescription.js',
+          rootPath: dir.path,
+        ),
+        'restoreDescription.js',
+      );
+      expect(
+        normalizePackReferencePath(
+          'assignForSolutionArchitecture.js',
+          rootPath: dir.path,
+        ),
+        'js/assignForSolutionArchitecture.js',
+      );
+    });
   });
 }

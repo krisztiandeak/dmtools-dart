@@ -171,7 +171,7 @@ List<ToolDefinition> _commentTools() => [
           ToolParam(
             name: 'comment',
             description: 'The comment text',
-            aliases: ['text'],
+            aliases: ['text', 'body'],
           ),
           ToolParam(
             name: 'format',

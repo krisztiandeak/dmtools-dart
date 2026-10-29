@@ -528,10 +528,17 @@ class ToolBridge {
       if (!path.contains(dir)) path = '$path:$dir';
     }
     env['PATH'] = path;
-    if (workDir != null) {
-      env.addAll(parseEnvFile('$workDir/dmtools.env'));
-    }
-    env.addAll(PropertyReader.getOverrides());
+    final workDirEnv = workDir != null
+        ? parseEnvFile('$workDir/dmtools.env')
+        : const <String, String>{};
+    env.addAll(workDirEnv);
+    env.addAll(
+      PropertyReader.resolveEnvVariables(
+        PropertyReader.getOverrides(),
+        extraEnv: workDirEnv,
+        basePath: workDir,
+      ),
+    );
     return env;
   }
 

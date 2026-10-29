@@ -24,13 +24,14 @@ ToolParam _param(String name, String description, {bool required = true}) =>
 /// The gh-191 Java-named tools (frozen gap snapshot, `Confluence.java`
 /// `@MCPTool` annotations), grouped per the file's list-function pattern.
 
-/// All 15 Java-named tool definitions in Java catalog order.
+/// All Java-named tool definitions in Java catalog order.
 List<ToolDefinition> javaNameConfluenceTools() => [
       ..._javaNameContentByTitleTools(),
       ..._javaNameUrlFetchTools(),
       ..._javaNameFindTools(),
       ..._javaNameFindOrCreateTools(),
       ..._javaNameAttachmentListTools(),
+      ..._javaNameInlineCommentTools(),
       ..._javaNameProfileAndSearchTools(),
       ..._javaNameHistoryUpdateTools(),
       ..._javaNameUploadTools(),
@@ -175,6 +176,50 @@ List<ToolDefinition> _javaNameAttachmentListTools() => [
       ),
     ];
 
+/// Inline comment tools: `confluence_get_page_inline_comments` /
+/// `confluence_reply_to_inline_comment`.
+List<ToolDefinition> _javaNameInlineCommentTools() => [
+      _javaTool(
+        name: 'confluence_get_page_inline_comments',
+        description: 'Get inline comments (annotations) for a Confluence page. '
+            'Uses the Confluence REST API v2 and returns comment bodies in '
+            'storage format.',
+        category: 'content_retrieval',
+        params: [
+          _param('pageId', 'The content ID of the Confluence page'),
+          ToolParam(
+            name: 'limit',
+            description: 'Maximum number of inline comments to return. '
+                'Defaults to 25 if not provided.',
+            required: false,
+          ),
+        ],
+      ),
+      _javaTool(
+        name: 'confluence_reply_to_inline_comment',
+        description: 'Reply to an existing inline comment (annotation) on a '
+            'Confluence page. The reply body is treated as plain text and '
+            'converted to Confluence storage format.',
+        category: 'content_management',
+        params: [
+          _param(
+            'pageId',
+            'The content ID of the Confluence page where the inline comment is '
+                'located',
+          ),
+          _param(
+            'commentId',
+            'The ID of the inline comment (annotation) to reply to',
+          ),
+          _param(
+            'body',
+            'The reply text in plain text. Line breaks are converted to '
+                'paragraphs.',
+          ),
+        ],
+      ),
+    ];
+
 /// User profiles + text search: `confluence_get_current_user_profile`, `confluence_get_user_profile_by_id`, `confluence_search_content_by_text`.
 List<ToolDefinition> _javaNameProfileAndSearchTools() => [
       _javaTool(
@@ -299,7 +344,10 @@ List<ToolDefinition> _javaNameUploadTools() => [
 Map<String, Future<dynamic> Function(Map<String, dynamic>)>
     _javaNameLookupHandlers(ConfluenceClient client) => {
           'confluence_content_by_title': (a) => client.contentByTitle(
-              a['title'] as String, a['format'] as String?),
+                a['title'] as String,
+                a['format'] as String?,
+                a['space'] as String?,
+              ),
           'confluence_content_by_title_and_space': (a) =>
               client.contentByTitleAndSpace(
                 a['title'] as String,
@@ -318,6 +366,7 @@ Map<String, Future<dynamic> Function(Map<String, dynamic>)>
               ),
           'confluence_find_content': (a) => client.findContent(
                 a['title'] as String,
+                space: a['space'] as String?,
                 format: a['format'] as String?,
               ),
           'confluence_find_content_by_title_and_space': (a) =>
@@ -370,6 +419,17 @@ Map<String, Future<dynamic> Function(Map<String, dynamic>)>
                 a['contentId'] as String,
                 a['directory'] as String,
                 _boolArg(a, 'updateIfExists'),
+              ),
+          'confluence_get_page_inline_comments': (a) =>
+              client.getPageInlineComments(
+                a['pageId'] as String,
+                _intArg(a, 'limit'),
+              ),
+          'confluence_reply_to_inline_comment': (a) =>
+              client.replyToInlineComment(
+                a['pageId'] as String,
+                a['commentId'] as String,
+                a['body'] as String,
               ),
         };
 

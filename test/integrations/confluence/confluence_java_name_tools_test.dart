@@ -16,9 +16,11 @@ void main() {
 
   titleToolTests();
   findToolTests();
+  findOrCreateToolTests();
   childrenToolTests();
   profileTests();
   searchByTextTests();
+  updatePageWithHistoryTests();
   contentByUrlTests();
   shortLinkAuthTests();
   downloadShortLinkTests();
@@ -77,6 +79,26 @@ void titleToolTests() {
       );
     });
 
+    test('contentByTitle falls back to defaultSpace when space is empty',
+        () async {
+      final f = mockWithDefaultSpace(
+        (o) => routeByPath({'/content': _listingBody}, o),
+      );
+      await f.client.contentByTitle('Docs', null, '');
+      expect(f.adapter.calls.single.queryParameters['spaceKey'], 'ENG');
+    });
+
+    test('contentByTitle prefers explicit space over defaultSpace', () async {
+      final f = mockWithDefaultSpace(
+        (o) => routeByPath({'/content': _listingBody}, o),
+      );
+      await ConfluenceToolExecutor(f.client).execute(
+        'confluence_content_by_title',
+        {'title': 'Docs', 'space': 'DEV'},
+      );
+      expect(f.adapter.calls.single.queryParameters['spaceKey'], 'DEV');
+    });
+
     test('contentByTitleAndSpace converts storage to markdown', () async {
       final f = mockWithDefaultSpace(
         (o) => routeByPath({'/content': _listingBody}, o),
@@ -111,6 +133,32 @@ void findToolTests() {
       expect(f.adapter.calls.single.queryParameters['spaceKey'], 'DEV');
     });
 
+    test('findContent falls back to defaultSpace when space is empty',
+        () async {
+      final f = mockWithDefaultSpace(
+        (o) => routeByPath({'/content': _emptyListingBody}, o),
+      );
+      await ConfluenceToolExecutor(f.client).execute(
+        'confluence_find_content',
+        {'title': 'Docs', 'space': '  '},
+      );
+      expect(f.adapter.calls.single.queryParameters['spaceKey'], 'ENG');
+    });
+
+    test('findContent throws without a default space when space is empty',
+        () async {
+      final f = mockConfluence((o) => '{}');
+      expect(
+        f.client.findContent('Docs', space: ''),
+        throwsA(isA<StateError>()),
+      );
+    });
+  });
+}
+
+/// `findOrCreate`.
+void findOrCreateToolTests() {
+  group('ConfluenceClient.findOrCreate tools', () {
     test('findOrCreate returns the existing page', () async {
       final f = mockWithDefaultSpace(
         (o) => routeByPath({'/content': _listingBody}, o),
@@ -211,6 +259,47 @@ void searchByTextTests() {
           'title,body.excerpt,history,space,body.storage');
     });
 
+    test('searchContentByText scopes CQL to defaultSpace when configured',
+        () async {
+      final f = mockWithDefaultSpace(
+        (o) => routeByPath({'/content/search': '{"results":[{"id":"9"}]}'}, o),
+      );
+      final results = await f.client.searchContentByText('docs');
+      expect(results.single['id'], '9');
+      final call = f.adapter.calls.single;
+      expect(
+        call.queryParameters['cql'],
+        '(title ~ "docs" OR text ~ "docs") AND space = "ENG" '
+        'ORDER BY lastModified ASC',
+      );
+    });
+
+    test(
+        'searchContentByText preserves query when space clause is already present',
+        () async {
+      final f = mockWithDefaultSpace(
+        (o) => routeByPath({'/content/search': '{"results":[{"id":"9"}]}'}, o),
+      );
+      await f.client.searchContentByText('docs AND space = "DEV"');
+      expect(
+        f.adapter.calls.last.queryParameters['cql'],
+        '(title ~ "docs AND space = "DEV"" OR text ~ "docs AND space = "DEV"") '
+        'ORDER BY lastModified ASC',
+      );
+      await f.client.searchContentByText('docs AND space in ("DEV", "QA")');
+      expect(
+        f.adapter.calls.last.queryParameters['cql'],
+        '(title ~ "docs AND space in ("DEV", "QA")" '
+        'OR text ~ "docs AND space in ("DEV", "QA")") '
+        'ORDER BY lastModified ASC',
+      );
+    });
+  });
+}
+
+/// History-aware page update.
+void updatePageWithHistoryTests() {
+  group('ConfluenceClient.updatePageWithHistory', () {
     test('updatePageWithHistory sends the version message', () async {
       final f = mockConfluence((o) =>
           o.method == 'GET' ? '{"version":{"number":3}}' : '{"id":"555"}');

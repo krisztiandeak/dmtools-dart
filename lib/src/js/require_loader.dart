@@ -77,6 +77,7 @@ const String _requireLoaderBootstrap = '''
 
     var currentScriptDirectory = '';
     var moduleCache = {};
+    var loadedModules = [];
 
     function scriptDirOf(path) {
         if (typeof path !== 'string' || path.indexOf('/') === -1) {
@@ -151,8 +152,13 @@ const String _requireLoaderBootstrap = '''
         moduleCache[resolvedPath] = placeholder;
         try {
             currentScriptDirectory = scriptDirOf(resolvedPath);
+            var moduleCode = readModuleCode(resolvedPath);
+            loadedModules.push({
+                code: moduleCode,
+                dir: currentScriptDirectory
+            });
             var moduleExports =
-                eval(wrapModuleCode(readModuleCode(resolvedPath)));
+                eval(wrapModuleCode(moduleCode));
             moduleCache[resolvedPath] = moduleExports;
             return moduleExports;
         } catch (e) {
@@ -175,6 +181,30 @@ const String _requireLoaderBootstrap = '''
 
     globalThis.__setScriptDirectory = function(path) {
         currentScriptDirectory = scriptDirOf(path);
+    };
+
+    // Read-only accessor for the host: the require base of the module
+    // currently being evaluated (gh-409). The async pool uses it so a
+    // dispatched function re-evaluates against its declaring module's
+    // directory rather than the entry script's.
+    globalThis.__jsrScriptDirectory = function() {
+        return currentScriptDirectory;
+    };
+
+    // Require base of the module whose source contains [fnSource] (the
+    // text of a dispatched function). Searches the loaded modules newest
+    // first; falls back to the live directory when no module matches
+    // (e.g. a function declared in the entry script).
+    globalThis.__jsrDirForSource = function(fnSource) {
+        if (typeof fnSource !== 'string' || fnSource.length === 0) {
+            return currentScriptDirectory;
+        }
+        for (var i = loadedModules.length - 1; i >= 0; i--) {
+            if (loadedModules[i].code.indexOf(fnSource) !== -1) {
+                return loadedModules[i].dir;
+            }
+        }
+        return currentScriptDirectory;
     };
 })();
 ''';

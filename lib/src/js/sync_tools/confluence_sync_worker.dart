@@ -62,7 +62,8 @@ SyncWorkerPool get confluenceSyncWorkerPool => _confluenceSyncPool;
 /// `[1, _maxConfluenceParallelism]`, defaulting to 4 when unset or
 /// unparsable.
 int confluenceSyncParallelism([PropertyReader? reader]) {
-  final raw = (reader ?? PropertyReader()).getValue('CONFLUENCE_PARALLELISM');
+  final raw = (reader ?? PropertyReader())
+      .getValue(PropertyNames.CONFLUENCE_PARALLELISM);
   final parsed = int.tryParse((raw ?? '').trim());
   if (parsed == null) return _defaultConfluenceParallelism;
   if (parsed < 1) return 1;

@@ -28,14 +28,18 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
+
 import '../config/env_file_parser.dart';
 import '../config/property_reader.dart';
 import '../config/property_reader_getters.dart';
 import '../js/job_runner.dart';
+import '../pack/pack_provenance.dart';
 import 'cli_agent_params.dart';
 import 'cli_command_builder.dart';
 import 'cli_execution_helper.dart';
 import 'ticket_input_context_builder.dart';
+import 'ticket_smart_sources.dart';
 
 /// Executes a CliAgent job — lightweight CLI-agent orchestrator.
 ///
@@ -44,19 +48,7 @@ import 'ticket_input_context_builder.dart';
 /// tools with aggregated prompts and optional setup/cache/reset hooks,
 /// without needing an `inputJql` or a ticket system.
 class CliAgent {
-  /// Creates a CliAgent with the given [params].
-  ///
-  /// - [workingDirectory] — overrides `params.workingDirectory` when set.
-  /// - [ticketData] — raw tracker ticket JSON for the input context; in a
-  ///   real run this is fetched from Jira/ADO via the tracker client.
-  /// - [propertyReader] — property resolution; defaults to a new reader.
-  /// - [jsRunner] — JS execution engine; defaults to [JsJobRunner].
-  /// - [failOnJsActionErrors] — loud JS-action failure propagation (default
-  ///   `false`): when on, an uncaught exception in `preCliJSAction` or
-  ///   `postJSAction` fails the run visibly instead of being logged and
-  ///   swallowed. This is Java `Teammate` parity (epam/dm.ai#580, #585);
-  ///   the Java `CliAgent` — and this class with the flag off — keeps the
-  ///   swallow-and-continue contract. `TeammateJob` always turns it on.
+  /// Creates a CliAgent with the given [params] and optional overrides.
   CliAgent({
     required this.params,
     this.workingDirectory,
@@ -86,21 +78,13 @@ class CliAgent {
   /// JS runner for `.js` actions and hooks.
   final JsJobRunner jsRunner;
 
-  /// Loud JS-action failure propagation — Java `Teammate` parity
-  /// (epam/dm.ai#580, #585): when on, an uncaught exception in
-  /// `preCliJSAction` or `postJSAction` fails the run visibly; when off
-  /// (Java `CliAgent` parity) every JS-action error is logged and the
-  /// lifecycle continues.
+  /// Loud JS-action failure propagation (Java `Teammate` parity, #580/#585).
   final bool failOnJsActionErrors;
 
-  /// Set when [failOnJsActionErrors] is on and `preCliJSAction` failed
-  /// (uncaught exception or a business `{success:false}`/`false`) — the
-  /// CLI phase and `postJSAction` are skipped (Java Teammate hard stop).
+  /// Set when `preCliJSAction` failed in loud mode (skips CLI + postJSAction).
   bool _preCliJsActionSkipped = false;
 
-  /// Set together with [_preCliJsActionSkipped] when the failure was an
-  /// uncaught exception rather than a deliberate business skip — Teammate
-  /// reports these as `unexpectedSetupFailures` and aborts the job.
+  /// Set when `preCliJSAction` threw an uncaught exception in loud mode.
   bool _preCliSetupThrew = false;
 
   /// Result of the `cliCommands` phase — used by the reset hook.
@@ -109,12 +93,7 @@ class CliAgent {
   /// Input context path — cleaned up in the finally block.
   String? _inputContextPath;
 
-  /// Ticket data as seen by the JS actions (`params.ticket`).
-  ///
-  /// Either the tracker-fetched [ticketData] (Teammate job) or, when absent,
-  /// `input/<contextId>/ticket.json` loaded by convention (direct
-  /// `dmtools run` launches, e.g. the machine's review/rework runners).
-  /// Set once at the start of the lifecycle.
+  /// Ticket data seen by JS actions (`params.ticket`), resolved once at start.
   Map<String, dynamic>? _resolvedTicketData;
 
   /// Runs the full lifecycle. Returns a result map.
@@ -130,10 +109,13 @@ class CliAgent {
     }
     // Zone-scoped overrides: two CliAgent jobs running concurrently in one
     // isolate each keep their own `TrackerParams.envVariables` across
-    // awaits (Java gets this from ThreadLocal).
+    // awaits (Java gets this from ThreadLocal). Merge on top of any active
+    // overrides so parent/test overrides remain visible.
     return PropertyReader.runWithOverrides(
-      params.envVariables ?? {},
+      {...PropertyReader.getOverrides(), ...?params.envVariables},
       _runGuarded,
+      extraEnv: parseEnvFile('${_resolveWorkingDirectory()}/dmtools.env'),
+      basePath: _resolveWorkingDirectory(),
     );
   }
 
@@ -162,17 +144,20 @@ class CliAgent {
       _resolvedTicketData = _resolveTicketData(workDir);
       _clearStaleOutputs(workDir);
       await _executeScriptHook('setup', params.setup, workDir, null);
-      _executeJsAction('preJSAction', params.preJSAction, null, null, workDir,
+      final pre = _executeJsAction(
+          'preJSAction', params.preJSAction, null, null, workDir,
           skip: params.skipPreJSAction);
-      _inputContextPath = _createInputContext(workDir);
-      _executeJsAction(
-        'preCliJSAction',
-        params.preCliJSAction,
-        null,
-        _inputContextPath,
-        workDir,
-        skip: params.skipPreCliJSAction,
-      );
+      if (pre?.trim() == 'false') {
+        return {
+          'success': true,
+          'contextId': params.contextId,
+          'response': 'Skipped by pre-action'
+        };
+      }
+      _inputContextPath = await _createInputContext(workDir);
+      _executeJsAction('preCliJSAction', params.preCliJSAction, null,
+          _inputContextPath, workDir,
+          skip: params.skipPreCliJSAction);
       response = await _runResponsePhase(workDir);
       await _executeScriptHook('cache', params.cache, workDir, response);
       return {
@@ -182,12 +167,8 @@ class CliAgent {
         if (_preCliSetupThrew) 'unexpectedSetupFailure': true,
       };
     } finally {
-      await _executeScriptHook(
-        'reset',
-        params.reset,
-        workDir,
-        _cliResult != null ? _extractResponse(_cliResult!) : null,
-      );
+      await _executeScriptHook('reset', params.reset, workDir,
+          _cliResult != null ? _extractResponse(_cliResult!) : null);
       _performCleanup(workDir);
     }
   }
@@ -244,28 +225,7 @@ class CliAgent {
   // JS actions (preJSAction / preCliJSAction / postJSAction)
   // ------------------------------------------------------------------
 
-  /// Executes a JS action via [JsJobRunner] with context bindings.
-  ///
-  /// [skip] mirrors the Java `skipPreJSAction` / `skipPreCliJSAction` /
-  /// `skipPostJSAction` guards (epam/dm.ai#266): a set flag prevents the
-  /// hook and logs the skip — the log fires whenever the flag is set, even
-  /// when no hook path is configured (Java `else if` branch parity).
-  ///
-  /// Binds a top-level `metadata` into the JS `params` object
-  /// ([_metadataContextParams] — Java `TrackerParams.METADATA` binding,
-  /// epam/dm.ai#623 parity).
-  ///
-  /// Error contract (Java parity):
-  /// - Default ([failOnJsActionErrors] off — Java `CliAgent`): errors are
-  ///   caught and logged, the lifecycle continues.
-  /// - Loud mode (Java `Teammate`, epam/dm.ai#580/#585): an uncaught
-  ///   exception in `postJSAction` is rethrown as
-  ///   [_JsActionUncaughtException] so the run fails with the full JS
-  ///   error text; an uncaught exception in `preCliJSAction` marks the run
-  ///   as an unexpected setup failure and skips the CLI + post phases; a
-  ///   deliberate `false` / `{success:false}` from `preCliJSAction` skips
-  ///   those phases as a business skip. `preJSAction` stays advisory in
-  ///   both modes — Java Teammate never checks the uncaught marker there.
+  /// Executes a JS action via [JsJobRunner] with context and metadata bindings.
   String? _executeJsAction(
     String name,
     String? actionPath,
@@ -297,12 +257,7 @@ class CliAgent {
     }
   }
 
-  /// Loud-mode `preCliJSAction` business-skip check — Java
-  /// `Teammate.isPreCliJSActionFailure` parity: an explicit `false` or an
-  /// object/map containing `success: false` hard-stops the ticket (the JS
-  /// action is responsible for its own failure notification). Any other
-  /// value (including `null`/undefined — actions that don't return a
-  /// structured result) is treated as success.
+  /// Loud-mode `preCliJSAction` business-skip check (`false` or `success:false`).
   void _checkPreCliBusinessFailure(String name, String? result) {
     if (!failOnJsActionErrors ||
         name != 'preCliJSAction' ||
@@ -315,15 +270,7 @@ class CliAgent {
     _preCliJsActionSkipped = true;
   }
 
-  /// Error contract for a failed JS action (Java parity).
-  ///
-  /// Default ([failOnJsActionErrors] off — Java `CliAgent`) and
-  /// `preJSAction` in both modes (Java Teammate never checks the uncaught
-  /// marker there): logged, lifecycle continues. Loud mode:
-  /// `postJSAction` rethrows as [_JsActionUncaughtException] so the run
-  /// fails with the full JS error text (epam/dm.ai#585); `preCliJSAction`
-  /// marks the run as an unexpected setup failure and skips the CLI +
-  /// post phases (epam/dm.ai#580).
+  /// Error contract for a failed JS action (Java parity, #580/#585).
   String? _handleJsActionError(String name, Object e) {
     if (!failOnJsActionErrors || name == 'preJSAction') {
       stderr.writeln('$name failed, continuing: $e');
@@ -417,10 +364,14 @@ class CliAgent {
   /// periodically / per-line / on error. Otherwise the buffered path is used.
   Future<String> _executeCliCommands(String workDir) async {
     final builder = const CliCommandBuilder();
+    final resolvedPrompts = params.flattenCliPrompts(
+      params.cliPrompts,
+      conditionEvaluator: (cond) => _evaluateCliPromptCondition(cond, workDir),
+    );
     final finalCommands = builder.buildCommands(
       params.cliCommands,
       params.cliPrompt,
-      params.cliPromptsAsArray,
+      resolvedPrompts,
       params.cliPromptsByTracker,
       trackerType: propertyReader.getDefaultTracker(),
       workingDirectory: workDir,
@@ -514,13 +465,6 @@ class CliAgent {
   }
 
   /// Runs a context JS action via [JsJobRunner], injecting [context] globals.
-  ///
-  /// [contextParams] carries extra `params.*` bindings for specific actions
-  /// (the timer binds `metadata`; error/line actions stay unbound — Java
-  /// parity). Returns the JSON-serialized result (for line-stop boolean
-  /// parsing). Errors are caught and logged — the lifecycle continues —
-  /// mirroring the Java `executeJsAction` / `buildLineStopPredicate`
-  /// swallow-and-continue contract.
   String? _runContextJsAction(
     String name,
     String actionPath,
@@ -531,7 +475,7 @@ class CliAgent {
     try {
       return jsRunner.runScript(
         scriptPath: actionPath,
-        jobParams: _buildJobParams(null, null),
+        jobParams: _buildJobParams(null, _inputContextPath),
         ticket: _resolvedTicketData ?? ticketData,
         workingDirectory: workDir,
         config: JsRunConfig(
@@ -545,13 +489,79 @@ class CliAgent {
     }
   }
 
-  /// Top-level `metadata` binding merged into the params object of the
-  /// pre/post JS hooks (`preJSAction`, `preCliJSAction`, `postJSAction`,
-  /// timer) — Java `TrackerParams.METADATA` binding parity
-  /// (epam/dm.ai#623): vendored hooks (e.g. the `<contextId>_wip`
-  /// re-entrancy guard) read `params.metadata.contextId`. Null when the
-  /// job carries no metadata — Java's `JSONObject.put(key, null)` removes
-  /// the key (null-omission parity).
+  /// Evaluates a `cliPrompts` section condition script via [_runContextJsAction].
+  bool _evaluateCliPromptCondition(String conditionPath, String workDir) {
+    final resolvedPath = _resolveConditionPath(conditionPath, workDir);
+    final raw = _runContextJsAction(
+      'cliPrompts.condition',
+      resolvedPath,
+      workDir,
+      const {},
+      contextParams: _metadataContextParams(),
+    );
+    return isCliPromptConditionMet(raw);
+  }
+
+  /// Resolves [conditionPath] against [workDir] or the active agent pack root
+  /// inferred from sibling JS action paths when running from an unpacked pack.
+  String _resolveConditionPath(String conditionPath, String workDir) {
+    final raw = conditionPath.trim();
+    if (raw.isEmpty || p.isAbsolute(raw)) return raw;
+    final ref = _stripPackScheme(raw);
+    final directFile = File(p.join(workDir, ref));
+    if (directFile.existsSync()) return directFile.absolute.path;
+    final normalized = normalizePackReferencePath(ref);
+    final strippedFile = File(p.join(workDir, normalized));
+    if (strippedFile.existsSync()) return strippedFile.absolute.path;
+    return _resolveInPackRoot(normalized) ?? conditionPath;
+  }
+
+  String _stripPackScheme(String ref) {
+    if (!ref.startsWith('pack:')) return ref;
+    return ref.substring('pack:'.length).replaceFirst(RegExp('^/+'), '');
+  }
+
+  String? _resolveInPackRoot(String ref) {
+    final packRoot = _inferPackRoot();
+    if (packRoot == null) return null;
+    final candidate = File(p.normalize(p.join(packRoot.path, ref)));
+    if (!p.isWithin(packRoot.path, candidate.path) || !candidate.existsSync()) {
+      return null;
+    }
+    return candidate.absolute.path;
+  }
+
+  /// Infers the unpacked pack directory from any configured JS action path.
+  Directory? _inferPackRoot() {
+    final candidates = [
+      params.preJSAction,
+      params.preCliJSAction,
+      params.postJSAction,
+      params.timerJSAction,
+    ];
+    for (final path in candidates) {
+      final root = _findPackRootFor(path);
+      if (root != null) return root;
+    }
+    return null;
+  }
+
+  Directory? _findPackRootFor(String? actionPath) {
+    if (actionPath == null || !p.isAbsolute(actionPath)) return null;
+    var dir = File(actionPath).parent;
+    for (var depth = 0; depth < 5; depth++) {
+      if (File(p.join(dir.path, packProvenanceFileName)).existsSync() ||
+          File(p.join(dir.path, 'manifest.json')).existsSync()) {
+        return dir;
+      }
+      final parent = dir.parent;
+      if (parent.path == dir.path) break;
+      dir = parent;
+    }
+    return null;
+  }
+
+  /// Top-level `metadata` binding merged into `params` for JS hooks (#623).
   Map<String, dynamic>? _metadataContextParams() {
     final md = params.metadata;
     return md == null ? null : {'metadata': md};
@@ -559,11 +569,8 @@ class CliAgent {
 
   /// Merges the standard JS action globals with action-specific [context].
   Map<String, dynamic> _mergeContextGlobals(
-    Map<String, dynamic> context,
-    String workDir,
-  ) {
-    return {..._buildExtraGlobals(null, null, workDir), ...context};
-  }
+          Map<String, dynamic> context, String workDir) =>
+      {..._buildExtraGlobals(null, _inputContextPath, workDir), ...context};
 
   /// Whether the strict-mode guard applies: `requireCliOutputFile=true` and
   /// the CLI produced no output response — the same condition that makes
@@ -576,25 +583,7 @@ class CliAgent {
         !result.hasOutputResponse;
   }
 
-  /// Extracts the response from the CLI result.
-  ///
-  /// Mirrors Java `extractResponse`: `requireCliOutputFile` turns a missing
-  /// output file into an error; the output file content is preferred; command
-  /// responses are the fallback for successful runs. Failed runs are a
-  /// bounded excerpt instead (see below).
-  ///
-  /// Deliberate deviation from Java (gh-192): the fallbacks are [boundedLog]
-  /// excerpts, not the full `commandResponses` — post-actions publish the
-  /// response verbatim as PR/ticket comments, and a session log must never
-  /// be posted that way. Java still returns the full log here; this repo
-  /// intentionally does not.
-  ///
-  /// The failed-run summary embeds the established interruption marker
-  /// `outputs/response.md missing` verbatim: the vendored post-actions
-  /// (`pushReworkChanges` / `developTicketAndCreatePR` in the pinned agents
-  /// pack) classify responses by text-sniffing for that marker, so a failed
-  /// run is retried as interrupted — whatever exit code, and wherever the
-  /// excerpt window lands — instead of being announced as completed.
+  /// Extracts the response from the CLI result (with [boundedLog] excerpts, gh-192).
   String _extractResponse(CliExecutionResult result) {
     if (params.requireCliOutputFile && !result.hasOutputResponse) {
       return 'CLI command executed but did not produce output file:\n'
@@ -629,16 +618,16 @@ class CliAgent {
     String workDir,
     bool applyEnvFilters,
   ) {
-    var env = <String, String>{}
-      ..addAll(Platform.environment)
-      ..addAll(parseEnvFile('$workDir/dmtools.env'))
-      ..addAll(PropertyReader.getOverrides());
+    final workDirEnv = parseEnvFile('$workDir/dmtools.env');
+    var env = {
+      ...Platform.environment,
+      ...workDirEnv,
+      ...PropertyReader.resolveEnvVariables(PropertyReader.getOverrides(),
+          extraEnv: workDirEnv, basePath: workDir)
+    };
     if (applyEnvFilters) {
       env = CliExecutionHelper.filterEnvVariables(
-        env,
-        params.excludedEnvVariables,
-        params.excludeEnvVariablesByRegex,
-      );
+          env, params.excludedEnvVariables, params.excludeEnvVariablesByRegex);
     }
     return env;
   }
@@ -673,40 +662,55 @@ class CliAgent {
   }
 
   /// Creates the input context folder: `input/<contextId>/`.
-  ///
-  /// When resolved ticket data is set (fetched from a tracker, or loaded by
-  /// convention from `input/<contextId>/ticket.json`), the folder is
-  /// populated with `ticket.md`, `ticket.json`, `subtasks/`, and
-  /// `comments.md` via [TicketInputContextBuilder]. Otherwise an empty
-  /// folder is created — the ticket-agnostic behavior.
-  String _createInputContext(String workDir) {
-    return TicketInputContextBuilder(workDir).build(
+  Future<String> _createInputContext(String workDir) async {
+    final config = params.effectiveInputContextConfig;
+    final resolved = _resolvedTicketData ?? ticketData;
+    return TicketInputContextBuilder(
+      workDir,
+      propertyReader: propertyReader,
+      includeAttachments: params.includeAttachments,
+      skipAllAttachments: params.skipAllAttachments,
+      skipVideoAttachments: params.skipVideoAttachments,
+    ).build(
       params.contextId,
-      ticketData: _resolvedTicketData ?? ticketData,
+      ticketData: resolved,
+      config: config,
     );
   }
 
-  /// Resolves the ticket data for the JS `params.ticket` contract.
-  ///
-  /// [ticketData] (fetched by the Teammate job) wins. Otherwise a direct
-  /// `dmtools run` launch may still carry a ticket by convention: the CI
-  /// integration pre-writes `input/<contextId>/ticket.json` (the same file
-  /// [TicketInputContextBuilder] produces) before the run. Loading it keeps
-  /// `params.ticket.key` / `params.ticketKey` — and every JS action that
-  /// reads them (timer auto-commit, post-JS hooks) — working identically
-  /// for GitHub-issue runs and Jira runs. A malformed or missing file
-  /// behaves as "no ticket".
+  /// Resolves ticket data from [ticketData], disk, or `input.ticket`.
   Map<String, dynamic>? _resolveTicketData(String workDir) {
     if (ticketData != null) return ticketData;
-    if (params.contextId.isEmpty) return null;
-    final file = File('$workDir/input/${params.contextId}/ticket.json');
-    if (!file.existsSync()) return null;
-    try {
-      final decoded = jsonDecode(file.readAsStringSync());
-      return decoded is Map<String, dynamic> ? decoded : null;
-    } catch (_) {
-      return null;
+    final fromDisk = _readTicketJsonFromDisk(workDir);
+    if (fromDisk != null) return fromDisk;
+    final ticketKey = params.effectiveInputContextConfig.ticket;
+    if (ticketKey != null && ticketKey.isNotEmpty) {
+      return TicketSmartSources(propertyReader).fetchTicketByKey(ticketKey);
     }
+    return null;
+  }
+
+  Map<String, dynamic>? _readTicketJsonFromDisk(String workDir) {
+    if (params.contextId.isEmpty) return null;
+    final folderName = TicketInputContextBuilder.toInputFolderName(
+      params.contextId,
+    );
+    final candidates = <String>[
+      '$workDir/input/$folderName/ticket.json',
+      if (folderName != params.contextId)
+        '$workDir/input/${params.contextId}/ticket.json',
+    ];
+    for (final path in candidates) {
+      final file = File(path);
+      if (!file.existsSync()) continue;
+      try {
+        final decoded = jsonDecode(file.readAsStringSync());
+        if (decoded is Map<String, dynamic>) return decoded;
+      } catch (_) {
+        // Ignore malformed ticket.json and continue.
+      }
+    }
+    return null;
   }
 
   /// Ensures the `outputs/` folder exists before CLI commands run.
@@ -748,6 +752,10 @@ class CliAgent {
       'cliCommands': params.cliCommands,
       if (params.cliPrompt != null) 'cliPrompt': params.cliPrompt,
       if (params.contextId.isNotEmpty) 'contextId': params.contextId,
+      if (params.customParams != null) 'customParams': params.customParams,
+      if (params.metadata != null) 'metadata': params.metadata,
+      if (params.initiator != null) 'initiator': params.initiator,
+      if (params.outputType != null) 'outputType': params.outputType,
       if (response != null) 'response': response,
       if (inputFolderPath != null) 'inputFolderPath': inputFolderPath,
     };

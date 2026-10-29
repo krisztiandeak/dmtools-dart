@@ -98,13 +98,21 @@ class AdoWorkItemOps {
     String? description,
     Map<String, dynamic>? fieldsJson,
     String? format,
-  }) async =>
-      jsonDecode(await _http.postPatch(
-        'wit/workitems/\$$workItemType',
-        body: adoCreatePatch(title, description, fieldsJson,
-            markdown: isAdoMarkdownFormat(format)),
-        project: project.isEmpty ? null : project,
-      )) as Map<String, dynamic>;
+  }) async {
+    // ADO rejects a numeric id in the project slot with TF200016
+    // ("project does not exist: 879"); fail early with a clear message.
+    if (RegExp(r'^\d+$').hasMatch(project.trim())) {
+      throw ArgumentError(
+          'ado_create_work_item: "$project" is a numeric id, not a project '
+          'name. Pass the ADO project name.');
+    }
+    return jsonDecode(await _http.postPatch(
+      'wit/workitems/\$$workItemType',
+      body: adoCreatePatch(title, description, fieldsJson,
+          markdown: isAdoMarkdownFormat(format)),
+      project: project.isEmpty ? null : project,
+    )) as Map<String, dynamic>;
+  }
 
   /// Creates a work item and, when [parentId] is given, links it as the
   /// parent's child (Hierarchy-Forward on the parent).

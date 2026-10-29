@@ -3,7 +3,7 @@ description: >-
   Pure Dart port of DMTools — enterprise dark-factory orchestrator
   (Jira, ADO, GitHub, Confluence, AI providers) with a QuickJS
   scripting runtime. See GOAL.md.
-version: 0.1.54
+version: 0.1.81
 publish_to: none
 
 environment:

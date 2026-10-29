@@ -8,7 +8,12 @@ List<ToolDefinition> _attachmentTools() => [
         aliases: ['tracker_attach_file'],
         description: 'Attach a file to a Jira ticket via multipart upload',
         params: [
-          _keyParam,
+          ToolParam(
+            name: 'key',
+            description: 'The Jira ticket key (e.g. PROJ-123)',
+            required: true,
+            aliases: ['ticketKey', 'id'],
+          ),
           ToolParam(
             name: 'fileName',
             description: 'The name to give the attached file',

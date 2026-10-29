@@ -278,6 +278,8 @@ const _expectedToolOrder = [
   'confluence_find_or_create',
   'confluence_get_children_by_name',
   'confluence_get_content_attachments',
+  'confluence_get_page_inline_comments',
+  'confluence_reply_to_inline_comment',
   'confluence_get_current_user_profile',
   'confluence_get_user_profile_by_id',
   'confluence_search_content_by_text',

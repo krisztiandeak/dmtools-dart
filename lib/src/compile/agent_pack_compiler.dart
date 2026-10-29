@@ -22,6 +22,7 @@ import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
+import '../pack/pack_provenance.dart';
 import 'js_scrubber.dart';
 
 /// The result of a compile: the produced artifacts.
@@ -72,6 +73,7 @@ class AgentPackCompiler {
     'preprocessJSAction',
     'preAction',
     'postAction',
+    'thenAction',
   ];
 
   /// Matches `require('./x.js')` / `loadModule('./x.js')`.
@@ -190,12 +192,30 @@ class AgentPackCompiler {
   void _collectPathsFromJson(Map<String, dynamic> config,
       Map<String, File> closure, Set<String> visitedJs) {
     _collectSinglePathKeys(config, closure, visitedJs);
-
     for (final item in _findList(config, 'cliPrompts')) {
-      if (item is String) _maybeAddPathReference(item, closure, visitedJs);
+      _collectCliPromptItem(
+        item,
+        (v) => _maybeAddPathReference(v, closure, visitedJs),
+        (v) => _addPathReference(v, closure, visitedJs),
+      );
     }
-
+    _collectPromptsByTracker(config, closure, visitedJs);
     _collectCliCommands(config, closure, visitedJs);
+  }
+
+  void _collectPromptsByTracker(Map<String, dynamic> config,
+      Map<String, File> closure, Set<String> visitedJs) {
+    final byTracker = _deepFindMap(config, 'cliPromptsByTracker');
+    if (byTracker == null) return;
+    for (final list in byTracker.values.whereType<List>()) {
+      for (final item in list) {
+        _collectCliPromptItem(
+          item,
+          (v) => _maybeAddPathReference(v, closure, visitedJs),
+          (v) => _addPathReference(v, closure, visitedJs),
+        );
+      }
+    }
   }
 
   /// Collects `cliCommands` paths; any `scripts/**` reference embeds the whole
@@ -388,20 +408,14 @@ class AgentPackCompiler {
   /// Normalizes a reference to its pack-relative path, or returns `null` for a
   /// non-repo-file reference (URL, `classpath:`, or a bare literal).
   String? _normalizeReference(String raw) {
-    var ref = raw.trim();
+    final ref = raw.trim();
     if (ref.isEmpty ||
         ref.startsWith('http://') ||
         ref.startsWith('https://') ||
         ref.startsWith('classpath:')) {
       return null;
     }
-    while (ref.startsWith('./')) {
-      ref = ref.substring(2);
-    }
-    if (ref.startsWith('agents/')) {
-      ref = ref.substring('agents/'.length);
-    }
-    return ref;
+    return normalizePackReferencePath(ref, rootPath: _rootPath);
   }
 
   /// Resolves a reference to a source file, or `null` when absent/not a file.
@@ -621,3 +635,21 @@ class _CommentStripper {
 }
 
 enum _State { code, lineComment, blockComment, string }
+
+void _collectCliPromptItem(
+  Object? item,
+  void Function(String) onPrompt,
+  void Function(String) onCondition,
+) {
+  if (item is String) {
+    onPrompt(item);
+    return;
+  }
+  if (item is! Map) return;
+  final single = item['prompt'];
+  if (single is String && single.isNotEmpty) onPrompt(single);
+  final prompts = item['prompts'];
+  if (prompts is List) prompts.whereType<String>().forEach(onPrompt);
+  final condition = item['condition'];
+  if (condition is String && condition.isNotEmpty) onCondition(condition);
+}

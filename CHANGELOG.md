@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Agent-action JS: `require` in dispatched functions resolves from the declaring module's directory (gh-409). Config action paths (`thenAction`, `preJSAction`, `postJSAction`, `preCliJSAction`) rebase to the config file's directory when the file exists there; otherwise the CWD-relative path is kept. If a file exists in both the config directory and the CWD, the config-directory copy now wins.
+
 - `CliDispatcher` takes its engine-worker and Confluence pools through
   `CliDispatcherPools` (the `asyncPool` / `confluencePool` named parameters
   moved there). Internal `src` API; out-of-tree callers must update.

@@ -82,6 +82,19 @@ String markdownToConfluenceStorage(String markdown) {
   return blocks.map(_renderBlock).join();
 }
 
+/// Converts plain-text [text] into `<p>`-wrapped storage XHTML for inline
+/// comment replies (Java `Confluence.prepareInlineCommentBody` parity).
+String prepareConfluenceInlineCommentBody(String text) {
+  if (text.trim().isEmpty) return '<p></p>';
+  final lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .where((l) => l.isNotEmpty)
+      .map((l) => '<p>${escapeXml(l)}</p>')
+      .toList();
+  return lines.isEmpty ? '<p></p>' : lines.join('\n');
+}
+
 /// Converts Confluence Storage Format [storage] into Markdown.
 String confluenceStorageToMarkdown(String storage) {
   if (storage.trim().isEmpty) return '';

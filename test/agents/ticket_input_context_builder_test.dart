@@ -15,6 +15,8 @@ void main() {
   missingFieldsTests();
   subtaskEdgeCaseTests();
   contextPathTests();
+  inputFolderNameTests();
+  requestMdTests();
 }
 
 // ======================================================================
@@ -321,14 +323,104 @@ void contextPathTests() {
         tmp.deleteSync(recursive: true);
       }
     });
+
+    test('maps GitHub composite key owner/repo#N to input/gh-N', () {
+      final tmp = _createTempDir();
+      try {
+        final builder = TicketInputContextBuilder(tmp.path);
+        final path =
+            builder.build('acme/widgets#42', ticketData: _fullTicket());
+        expect(path, '${tmp.path}/input/gh-42');
+        expect(File('$path/ticket.md').existsSync(), isTrue);
+        expect(File('$path/ticket.json').existsSync(), isTrue);
+      } finally {
+        tmp.deleteSync(recursive: true);
+      }
+    });
   });
 }
 
-// ======================================================================
-// Fixtures
-// ======================================================================
+void inputFolderNameTests() {
+  group('TicketInputContextBuilder.toInputFolderName', () {
+    test('maps composite and bare GitHub keys and preserves others', () {
+      expect(
+        TicketInputContextBuilder.toInputFolderName('acme/widgets#42'),
+        'gh-42',
+      );
+      expect(
+        TicketInputContextBuilder.toInputFolderName('#7'),
+        'gh-7',
+      );
+      expect(
+        TicketInputContextBuilder.toInputFolderName('PROJ-123'),
+        'PROJ-123',
+      );
+      expect(
+        TicketInputContextBuilder.toInputFolderName('batch/run-42'),
+        'batch/run-42',
+      );
+    });
+  });
+}
 
-/// A complete Jira-style ticket with status, priority, and description.
+void requestMdTests() {
+  group('TicketInputContextBuilder — request.md and ADO markdown', () {
+    test('writes request.md matching ticket.md and parses CliAgentParams flags',
+        () {
+      final p = CliAgentParams.fromJson({
+        'includeAttachments': false,
+        'skipAllAttachments': true,
+        'skipVideoAttachments': true,
+      });
+      expect(p.includeAttachments, isFalse);
+      expect(p.skipAllAttachments, isTrue);
+      expect(p.skipVideoAttachments, isTrue);
+      expect(
+        CliAgentParams.fromJson({
+          'input': {'skipAllAttachments': 'true'}
+        }).skipAllAttachments,
+        isTrue,
+      );
+      final tmp = _createTempDir();
+      try {
+        final builder = TicketInputContextBuilder(tmp.path);
+        builder.build('PROJ-1', ticketData: _fullTicket());
+        final ticketMd =
+            File('${tmp.path}/input/PROJ-1/ticket.md').readAsStringSync();
+        final requestMd =
+            File('${tmp.path}/input/PROJ-1/request.md').readAsStringSync();
+        expect(requestMd, equals(ticketMd));
+        expect(requestMd, contains('# PROJ-100: Implement login'));
+      } finally {
+        tmp.deleteSync(recursive: true);
+      }
+    });
+
+    test('formats ADO System.* fields into ticket.md and request.md', () {
+      final tmp = _createTempDir();
+      try {
+        TicketInputContextBuilder(tmp.path).build('1234', ticketData: {
+          'id': 1234,
+          'fields': {
+            'System.Title': 'Fix crash on launch',
+            'System.State': 'Active',
+            'Microsoft.VSTS.Common.Priority': 1,
+            'Microsoft.VSTS.TCM.ReproSteps': 'Open app and tap login',
+          },
+        });
+        final req =
+            File('${tmp.path}/input/1234/request.md').readAsStringSync();
+        expect(req, contains('# 1234: Fix crash on launch'));
+        expect(req, contains('**Status:** Active'));
+        expect(req, contains('**Priority:** 1'));
+        expect(req, contains('Open app and tap login'));
+      } finally {
+        tmp.deleteSync(recursive: true);
+      }
+    });
+  });
+}
+
 Map<String, dynamic> _fullTicket() => {
       'key': 'PROJ-100',
       'fields': {
@@ -339,7 +431,6 @@ Map<String, dynamic> _fullTicket() => {
       },
     };
 
-/// A ticket with two subtasks.
 Map<String, dynamic> _ticketWithSubtasks() => {
       'key': 'PROJ-100',
       'fields': {
@@ -365,7 +456,6 @@ Map<String, dynamic> _ticketWithSubtasks() => {
       },
     };
 
-/// A ticket with comments under the Jira `fields.comment.comments` structure.
 Map<String, dynamic> _ticketWithComments() => {
       'key': 'PROJ-100',
       'fields': {

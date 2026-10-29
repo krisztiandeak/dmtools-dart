@@ -91,8 +91,9 @@ List<ToolDefinition> _prReadTools() => [
         name: 'github_list_prs',
         description:
             "List pull requests in a GitHub repository by state. State can "
-            "be 'open', 'closed', or 'merged'. Returns first page (up to "
-            '100) of pull requests.',
+            "be 'open', 'closed', or 'merged'. 'open' returns every "
+            "page; 'closed'/'merged' return the first page (up to 100, "
+            'most recently updated first) because history can be huge.',
         integration: 'github',
         category: 'pull_requests',
         aliases: ['source_code_list_prs'],

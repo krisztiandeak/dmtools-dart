@@ -85,7 +85,9 @@ void devRunnerWiringTests() {
     });
   }
 
-  test('parents stay untouched (the wiring is deployment local)', () {
+  test(
+      'parents keep base cliPrompts tracker-agnostic (tracker format lives in cliPromptsByTracker)',
+      () {
     for (final parent in const [
       'agents/bug_development.json',
       'agents/story_development.json',
@@ -93,9 +95,24 @@ void devRunnerWiringTests() {
     ]) {
       final json = jsonDecode(File(parent).readAsStringSync()) as Map;
       final params = json['params'] as Map?;
-      expect(params?['cliPromptsByTracker'], isNull,
-          reason: '$parent must stay tracker-agnostic — the github key is '
-              'this deployment\'s override (upstream gets it later)');
+      final basePrompts = (params?['cliPrompts'] as List?) ?? const [];
+      expect(
+        basePrompts.whereType<String>().any((p) =>
+            p.contains('jira_comment_format.md') ||
+            p.contains('ado_comment_format.md') ||
+            p.contains('github_comment_format.md')),
+        isFalse,
+        reason: '$parent base cliPrompts must stay tracker-agnostic',
+      );
+      final byTracker = params?['cliPromptsByTracker'] as Map?;
+      if (byTracker != null) {
+        expect(
+          byTracker['github'],
+          contains('./agents/instructions/common/github_comment_format.md'),
+          reason:
+              '$parent cliPromptsByTracker.github must wire github_comment_format.md',
+        );
+      }
     }
   });
 }

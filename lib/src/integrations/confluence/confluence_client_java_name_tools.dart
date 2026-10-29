@@ -15,13 +15,9 @@ extension ConfluenceJavaNameTools on ConfluenceClient {
   Future<Map<String, dynamic>> contentByTitle(
     String title, [
     String? format,
-  ]) async {
-    final space = defaultSpace;
-    if (space == null) {
-      throw StateError('Default space not set');
-    }
-    return contentByTitleAndSpace(title, space, format);
-  }
+    String? space,
+  ]) async =>
+      contentByTitleAndSpace(title, _effectiveSpace(space), format);
 
   /// `confluence_content_by_title_and_space` — GET
   /// `content?title=&spaceKey=&expand=…` (Java `content`).
@@ -69,11 +65,8 @@ extension ConfluenceJavaNameTools on ConfluenceClient {
     String? space,
     String? format,
   }) async {
-    final effectiveSpace = space ?? defaultSpace;
-    if (effectiveSpace == null) {
-      throw StateError('Default space not set');
-    }
-    final listing = await contentByTitleAndSpace(title, effectiveSpace, null);
+    final listing =
+        await contentByTitleAndSpace(title, _effectiveSpace(space), null);
     final contents = _resultList(listing);
     if (contents.isEmpty) return null;
     ConfluenceClient._applyFormat([contents.first], format);
@@ -87,10 +80,7 @@ extension ConfluenceJavaNameTools on ConfluenceClient {
     String parentId,
     String body,
   ) async {
-    final space = defaultSpace;
-    if (space == null) {
-      throw StateError('Default space not set');
-    }
+    final space = _effectiveSpace(null);
     final existing = await findContent(title, space: space);
     return existing ?? createPage(space, title, body, parentId: parentId);
   }
@@ -146,12 +136,22 @@ extension ConfluenceJavaNameTools on ConfluenceClient {
       _getList(
         'content/search',
         queryParams: {
-          'cql':
-              '(title ~ "$query" OR text ~ "$query") ORDER BY lastModified ASC',
+          'cql': buildConfluenceTextSearchCql(query, defaultSpace),
           'limit': '${limit ?? 20}',
           'expand': 'title,body.excerpt,history,space,body.storage',
         },
       );
+
+  /// Resolves [space] with fallback to [defaultSpace]; throws [StateError]
+  /// when neither is non-empty.
+  String _effectiveSpace(String? space) {
+    final candidate =
+        (space != null && space.trim().isNotEmpty) ? space : defaultSpace;
+    if (candidate == null || candidate.trim().isEmpty) {
+      throw StateError('Default space not set');
+    }
+    return candidate.trim();
+  }
 
   /// `confluence_update_page_with_history` — [updatePage] whose bumped
   /// version message is [historyComment] (Java tool of the same name).
@@ -251,5 +251,42 @@ extension ConfluenceJavaNameTools on ConfluenceClient {
     } on DioException {
       return null;
     }
+  }
+
+  /// `confluence_get_page_inline_comments` — GET
+  /// `pages/{pageId}/inline-comments?body-format=storage[&limit=…]` via v2 API
+  /// (Java `Confluence.getPageInlineComments`).
+  Future<Map<String, dynamic>> getPageInlineComments(
+    String pageId, [
+    int? limit,
+  ]) async {
+    final body = await _http.getV2(
+      'pages/$pageId/inline-comments',
+      queryParams: {
+        'body-format': _kStorage,
+        if (limit != null && limit > 0) 'limit': '$limit',
+      },
+    );
+    return jsonDecode(body) as Map<String, dynamic>;
+  }
+
+  /// `confluence_reply_to_inline_comment` — POST `inline-comments` via v2 API
+  /// (Java `Confluence.replyToInlineComment`).
+  Future<Map<String, dynamic>> replyToInlineComment(
+    String pageId,
+    String commentId,
+    String text,
+  ) async {
+    final body = await _http.postV2(
+      'inline-comments',
+      body: jsonEncode({
+        'parentCommentId': commentId,
+        'body': {
+          'representation': _kStorage,
+          'value': prepareConfluenceInlineCommentBody(text),
+        },
+      }),
+    );
+    return jsonDecode(body) as Map<String, dynamic>;
   }
 }

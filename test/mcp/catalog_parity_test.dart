@@ -56,6 +56,7 @@ void main() {
   paritySnapshotTests(javaNames, dartNames, frozenGaps);
   equivalentMappingTests(javaNames, dartNames);
   parameterParityTests(dartTools);
+  createLabelsSchemaTests(dartTools);
 }
 
 /// Asserts the fixture files are well-formed and in sync.
@@ -202,6 +203,34 @@ void parameterParityTests(List<ToolDefinition> dartTools) {
   });
 }
 
+/// gh-427 AC4/IT-3: the create tools advertise an optional `labels` param.
+///
+/// `jira_create_ticket_with_json` keeps its two-param shape — labels there is
+/// a `fieldsJson` member, never a top-level argument (E5).
+void createLabelsSchemaTests(List<ToolDefinition> dartTools) {
+  group('create-tool labels schema', () {
+    final byName = {for (final t in dartTools) t.name: t};
+
+    test('both convenience create tools advertise optional labels', () {
+      for (final name in [
+        'jira_create_ticket_basic',
+        'jira_create_ticket_with_parent',
+      ]) {
+        final param =
+            byName[name]!.params.singleWhere((p) => p.name == 'labels');
+        expect(param.required, isFalse, reason: name);
+        expect(param.type, 'array', reason: name);
+      }
+    });
+
+    test('with_json does not advertise a top-level labels param', () {
+      final names =
+          byName['jira_create_ticket_with_json']!.params.map((p) => p.name);
+      expect(names, ['project', 'fieldsJson']);
+    });
+  });
+}
+
 /// The Java tool names fixture, used to detect unclassified exact matches.
 final _javaNameFixture = _readFixture('java_mcp_tool_names.txt').toSet();
 
@@ -218,11 +247,12 @@ Map<String, List<String>> _readParamFixture(String name) {
 bool _listEquals(List<String> a, List<String> b) =>
     a.length == b.length && a.indexed.every((e) => b[e.$1] == e.$2);
 
-/// Reads a newline-delimited fixture under `test/fixtures`, sorted, no blanks.
+/// Reads a newline-delimited fixture under `test/fixtures`, sorted, no
+/// blanks; `#` comment lines carry divergence notes and are skipped.
 List<String> _readFixture(String name) {
   final lines = File('test/fixtures/$name')
       .readAsLinesSync()
-      .where((l) => l.trim().isNotEmpty)
+      .where((l) => l.trim().isNotEmpty && !l.trim().startsWith('#'))
       .toList()
     ..sort();
   return lines;

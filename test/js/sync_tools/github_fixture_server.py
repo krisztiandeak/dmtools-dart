@@ -243,6 +243,39 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
         base = path.split("?")[0]
         accept = self.headers.get("Accept", "")
 
+        # Job logs: plain-text body (the real endpoint answers raw logs,
+        # not JSON — the bridge must JSON-encode it, live: dmtools-dart
+        # rework legs starved on "host callback returned invalid JSON").
+        if base.endswith("/actions/jobs/7/logs"):
+            self._record(body)
+            self._respond(
+                200,
+                "2026-10-17T08:00:00Z ##[error]method_size: 1 violations\n"
+                "plain text, not JSON <<< >>>",
+                "text/plain",
+            )
+            return
+
+        # Job logs for job 302: like the real API, 302 to a signed blob
+        # URL — the client must follow it (live: empty job logs).
+        if base.endswith("/actions/jobs/302/logs"):
+            self._record(body)
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                "http://127.0.0.1:%d/blob/job-302.txt"
+                % self.server.server_address[1],
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if base == "/blob/job-302.txt":
+            self._record(body)
+            self._respond(
+                200, "##[error]redirected blob log body\n", "text/plain"
+            )
+            return
+
         # Workflow run logs: 302 redirect to the ZIP archive.
         if base.endswith("/actions/runs/55/logs"):
             self._record(body)
@@ -259,6 +292,21 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             self._respond(200, build_zip(), "application/zip")
             return
 
+        # gh-388 list pagination: o/pg serves full page 1 + 2-item page
+        # 2; o/pgfail fails page 2 (walk keeps page 1).
+        if base.startswith("/repos/o/pg/") or base.startswith("/repos/o/pgfail/"):
+            self._record(body)
+            page = _query_param(path, "page") or "1"
+            if page != "1" and base.startswith("/repos/o/pgfail/"):
+                self._respond(500, '{"message": "page boom"}')
+                return
+            items = [{"id": int(page) * 1000 + i, "page": int(page)}
+                     for i in range(100 if page == "1" else 2)]
+            if base.endswith("/jobs"):
+                self._respond(200, {"total_count": 102, "jobs": items})
+            else:
+                self._respond(200, items)
+            return
         if base == "/repos/o/r/commits/pagedsha/check-runs":
             self._record(body)
             if _query_param(path, "page") == "2":

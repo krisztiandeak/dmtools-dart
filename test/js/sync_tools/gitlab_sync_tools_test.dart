@@ -456,11 +456,16 @@ void testcitools_p1() {
   });
 
   test('gitlab_get_job_logs GETs the job trace', () {
-    final body = echo('gitlab_get_job_logs', {
+    // The trace endpoint answers plain text (the echo payload rides
+    // inside as text); the bridge contract wraps it in a JSON string.
+    final raw = tools.handlers['gitlab_get_job_logs']!({
       'workspace': 'g',
       'repository': 'r',
       'jobId': '77',
     });
+    final decoded = jsonDecode(raw);
+    expect(decoded, isA<String>());
+    final body = jsonDecode(decoded as String) as Map<String, dynamic>;
     expect(body['method'], 'GET');
     expect(body['path'], '/api/v4/projects/g%2Fr/jobs/77/trace');
   });
